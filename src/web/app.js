@@ -1,4 +1,5 @@
 const $=id=>document.getElementById(id), num=value=>Number(value||0).toLocaleString('pt-BR'), label=value=>String(value||'').replaceAll('_',' ').replace(/\b\w/g,c=>c.toUpperCase());
+setTimeout(()=>{const baseRender=render;render=function(data){baseRender(data);if(!data.ready)return;const efficacy=$('efficacy'),adherence=$('adherence');if(efficacy)efficacy.parentElement.style.setProperty('--eff',data.efficacy+'%');if(adherence)adherence.parentElement.style.setProperty('--eff',data.adherence+'%')}},0);
 let current='dashboard',optionsLoaded=false,uploaded=0;
 const uploadSources=[
   ['sap_entry_current','SAP — Entradas','entrada_sisdev.xlsx','Notas de venda com retorno para a unidade comercial.'],
