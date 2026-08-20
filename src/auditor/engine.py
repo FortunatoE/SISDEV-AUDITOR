@@ -16,6 +16,7 @@ SOURCES = [
     ("sisdev_movement", DATA / "RelAnaliseMovimentacaoAgrotoxico (2).xlsx", 2),
     ("agrotis_recipe", DATA / "ReceitasEmitidas.xls", 0),
 ]
+RECIPE_CACHE = {}
 
 
 def field(row, *names):
@@ -172,6 +173,87 @@ def validation_rows(limit=None):
     return [{str(k):(None if pd.isna(v) else (v.isoformat() if hasattr(v,"isoformat") else v)) for k,v in line.items()} for _,line in frame.iterrows()]
 
 
+def _recipes_for_regularization(conn, run_id):
+    """Return the operational fields from Agrotis recipes in a stable schema."""
+    if run_id in RECIPE_CACHE:
+        return RECIPE_CACHE[run_id]
+    recipes = []
+    for record in conn.execute("SELECT raw_json FROM source_records WHERE run_id=? AND source='agrotis_recipe'", (run_id,)):
+        values = list(json.loads(record["raw_json"]).values())
+        if len(values) < 15:
+            continue
+        recipes.append({
+            "data_emissao": iso_date(values[2]), "produto": text(values[10]),
+            "numero_receita": text(values[9]), "art": text(values[0]),
+            "nome_rt": text(values[7]), "cultura": text(values[1]),
+            "diagnostico": text(values[3]), "dose_recomendada": number(values[4]),
+            "tipo_dosagem": text(values[12]), "area_receita": number(values[14]),
+            "quantidade_receita": number(values[11]), "unidade_receita": text(values[13]),
+        })
+    RECIPE_CACHE[run_id] = recipes
+    return recipes
+
+
+def _product_matches(left, right):
+    left, right = key(left), key(right)
+    if not left or not right:
+        return False
+    if left in right or right in left:
+        return True
+    left_terms = {term for term in left.split() if len(term) > 3}
+    right_terms = {term for term in right.split() if len(term) > 3}
+    return bool(left_terms & right_terms)
+
+
+def _regularization_rows(conn, run_id):
+    """Operational queue: one SAP line that still needs a SISDEV posting."""
+    recipes = _recipes_for_regularization(conn, run_id)
+    recipes_by_date = {}
+    for recipe in recipes:
+        recipes_by_date.setdefault(recipe["data_emissao"], []).append(recipe)
+    expected = conn.execute("""SELECT e.doc_date,e.cnpj,e.nf,e.series,e.direction,e.sap_material,
+        e.lot,e.manufacturer_lot,e.quantity,e.unit,e.center
+        FROM reconciliations r JOIN expected_movements e ON e.id=r.expected_id
+        WHERE r.run_id=? AND r.status='NAO_LANCADO'
+        ORDER BY e.doc_date DESC,e.nf,e.id""", (run_id,))
+    rows = []
+    for item in expected:
+        row = dict(item)
+        direction = "Entrada" if row["direction"] == "1" else "Saída"
+        base = {
+            "direcao": direction, "data_documento": row["doc_date"], "cnpj": row["cnpj"],
+            "numero_nf": row["nf"], "serie": row["series"], "produto": row["sap_material"],
+            "lote": row["manufacturer_lot"] or row["lot"], "lote_sap": row["lot"],
+            "quantidade_sap": row["quantity"], "unidade_sap": row["unit"], "ure": row["center"],
+            "volume_embalagem": None, "quantidade_embalagens": None,
+        }
+        if direction == "Entrada":
+            base.update({"situacao": "PREENCHER_EMBALAGEM", "pendencia": "Informar volume da embalagem e quantidade de embalagens no SISDEV."})
+            rows.append(base)
+            continue
+        document_date = datetime.strptime(row["doc_date"], "%Y-%m-%d").date() if row["doc_date"] else None
+        date_candidates = [] if not document_date else recipes_by_date.get(document_date.isoformat(), []) + recipes_by_date.get((document_date - timedelta(days=1)).isoformat(), [])
+        candidates = [recipe for recipe in date_candidates if _product_matches(row["sap_material"], recipe["produto"])]
+        if len(candidates) == 1:
+            recipe = candidates[0]
+            emission_window = "D" if recipe["data_emissao"] == document_date.isoformat() else "D-1"
+            calculated_area = round((row["quantity"] or 0) / recipe["dose_recomendada"], 2) if recipe["dose_recomendada"] else None
+            base.update({
+                "numero_receita": recipe["numero_receita"], "art": recipe["art"], "nome_rt": recipe["nome_rt"],
+                "cultura": recipe["cultura"], "diagnostico": recipe["diagnostico"],
+                "dose_recomendada": recipe["dose_recomendada"], "tipo_dosagem": recipe["tipo_dosagem"],
+                "area_receita": recipe["area_receita"], "area_calculada": calculated_area,
+                "janela_receita": emission_window, "situacao": "RECEITA_SUGERIDA",
+                "pendencia": "Validar volume e quantidade de embalagens; receita localizada em " + emission_window + ".",
+            })
+        elif len(candidates) > 1:
+            base.update({"situacao": "RECEITAS_MULTIPLAS", "janela_receita": "D/D-1", "pendencia": f"Selecionar uma entre {len(candidates)} receitas candidatas; depois informar embalagem."})
+        else:
+            base.update({"situacao": "SEM_RECEITA", "janela_receita": "D/D-1", "pendencia": "Localizar receita do mesmo dia ou D-1 e informar dados da embalagem."})
+        rows.append(base)
+    return rows
+
+
 def page_records_v2(page, filters=None):
     data = dashboard_v2(filters)
     if not data.get("ready"): return data
@@ -187,7 +269,15 @@ def page_records_v2(page, filters=None):
       "units_measure":"SELECT unit unidade,COUNT(*) ocorrencias FROM actual_movements WHERE run_id=? GROUP BY unit ORDER BY ocorrencias DESC",
       "history":"SELECT source,source_file,COUNT(*) linhas FROM source_records WHERE run_id=? GROUP BY source,source_file",
     }
-    if page == "pending": rows=data["pending"]
+    if page == "pending":
+      rows=[dict(x) for x in conn.execute("""SELECT r.status,r.diagnosis,r.confidence,e.nf,e.series,e.doc_date,e.center,
+        CASE e.direction WHEN '1' THEN 'Entrada' WHEN '2' THEN 'Saída' ELSE e.direction END direcao,
+        e.sap_material,e.lot lote_sap,e.manufacturer_lot lote_fabricante,e.quantity quantidade_sap,e.unit unidade_sap,
+        a.product produto_sisdev,a.lot lote_sisdev,a.quantity*a.volume quantidade_sisdev
+        FROM reconciliations r JOIN expected_movements e ON e.id=r.expected_id LEFT JOIN actual_movements a ON a.id=r.actual_id
+        WHERE r.run_id=? AND r.status!='CORRETO' ORDER BY e.doc_date DESC,r.id DESC LIMIT 1000""",(run_id,))]
+    elif page == "regularization":
+      rows=_regularization_rows(conn, run_id)
     elif page == "recipes":
       rows=[]
       for x in conn.execute("SELECT raw_json FROM source_records WHERE run_id=? AND source='agrotis_recipe' ORDER BY row_number LIMIT 500",(run_id,)):
@@ -203,7 +293,7 @@ def page_records_v2(page, filters=None):
       rows=[]
       for x in conn.execute("SELECT raw_json FROM source_records WHERE run_id=? AND source='sap_stock' ORDER BY row_number LIMIT 500",(run_id,)):
         raw=json.loads(x["raw_json"]); rows.append({"centro":field(raw,"Centro"),"deposito":field(raw,"Depósito"),"material":field(raw,"Texto breve material"),"lote":field(raw,"Lote"),"lote_fabricante":field(raw,"Lote Fabricante"),"quantidade_sap":field(raw,"Utilização livre"),"unidade":field(raw,"UMB")})
-    if page in ("pending", "recipes"):
+    if page in ("pending", "regularization", "recipes"):
       pass
     elif page == "stocks":
       sisdev=pd.read_excel(ROOT / "Acompanhamento SISDEV.xlsx",sheet_name="Estoque_SISDEV",skiprows=2,dtype=object).dropna(axis=1,how="all")
@@ -219,4 +309,7 @@ def page_records_v2(page, filters=None):
     elif page == "logs": rows=[dict(x) for x in conn.execute("SELECT id,started_at,finished_at,status,summary_json FROM import_runs ORDER BY id DESC")]
     elif page in queries: rows=[dict(x) for x in conn.execute(queries[page],(run_id,))]
     else: rows=[{"indicador":"Documentos SAP distintos","valor":data["total"]},{"indicador":"Eficácia","valor":f'{data["efficacy"]}%'},{"indicador":"Divergências","valor":data["statuses"].get("DIVERGENTE",0)}]
-    conn.close(); return {"page":page,"rows":rows}
+    summary = None
+    if page == "regularization":
+      summary = {"total": len(rows), "entries": sum(x["direcao"] == "Entrada" for x in rows), "exits": sum(x["direcao"] == "Saída" for x in rows), "recipes_suggested": sum(x["situacao"] == "RECEITA_SUGERIDA" for x in rows)}
+    conn.close(); return {"page":page,"rows":rows,"summary":summary}
