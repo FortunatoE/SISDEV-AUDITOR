@@ -1,0 +1,18 @@
+# Dados operacionais e artefatos locais: não versionar nem publicar.
+dados/
+banco/
+resultados/
+logs/
+config/local.*
+
+# Fontes de referência que podem conter dados empresariais.
+Acompanhamento SISDEV.xlsx
+Aderência SISDEV.pbix
+
+# Python e sistema operacional.
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.DS_Store
+Thumbs.db
