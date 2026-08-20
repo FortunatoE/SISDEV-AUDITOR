@@ -1,6 +1,7 @@
 import hashlib
 import json
 from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import pandas as pd
 from .database import ROOT, connect
@@ -186,12 +187,23 @@ def _recipes_for_regularization(conn, run_id):
             "data_emissao": iso_date(values[2]), "produto": text(values[10]),
             "numero_receita": text(values[9]), "art": text(values[0]),
             "nome_rt": text(values[7]), "cultura": text(values[1]),
-            "diagnostico": text(values[3]), "dose_recomendada": number(values[4]),
-            "tipo_dosagem": text(values[12]), "area_receita": number(values[14]),
-            "quantidade_receita": number(values[11]), "unidade_receita": text(values[13]),
+            "diagnostico": text(values[3]), "dose_recomendada": _recipe_number(values[4]),
+            "tipo_dosagem": text(values[12]), "area_receita": _recipe_number(values[14]),
+            "quantidade_receita": _recipe_number(values[11]), "unidade_receita": text(values[13]),
         })
     RECIPE_CACHE[run_id] = recipes
     return recipes
+
+
+def _recipe_number(value):
+    """Agrotis exports decimal values with a dot: 60.000 means 60."""
+    raw = text(value)
+    if "." in raw and "," not in raw:
+        try:
+            return float(Decimal(raw))
+        except (InvalidOperation, ValueError):
+            pass
+    return number(value)
 
 
 def preferred_rt(conn):
@@ -230,8 +242,8 @@ def _product_matches(left, right):
 
 def _normalized_dose(value, dosage_type):
     """Normalize operational dose units so the area calculation uses kg or L."""
-    dose = number(value)
-    normalized_type = key(dosage_type).replace(" ", "")
+    dose = value if isinstance(value, (int, float)) else _recipe_number(value)
+    normalized_type = "".join(char for char in key(dosage_type).lower() if char.isalpha())
     if dose is None:
         return None, text(dosage_type)
     if normalized_type == "gha":
@@ -239,6 +251,13 @@ def _normalized_dose(value, dosage_type):
     if normalized_type == "mlha":
         return dose / 1000, "L/ha"
     return dose, text(dosage_type)
+
+
+def _format_dose(dose, dosage_type):
+    if dose is None:
+        return None
+    shown = f"{dose:.6f}".rstrip("0").rstrip(".")
+    return f"{shown} {dosage_type}" if dosage_type else shown
 
 
 def _regularization_rows(conn, run_id, preferred_name=None):
@@ -281,7 +300,7 @@ def _regularization_rows(conn, run_id, preferred_name=None):
             base.update({
                 "numero_receita": recipe["numero_receita"], "art": recipe["art"], "nome_rt": recipe["nome_rt"],
                 "cultura": recipe["cultura"], "diagnostico": recipe["diagnostico"],
-                "dose_recomendada": f"{dose:g} {dose_type}" if dose is not None and dose_type else dose,
+                "dose_recomendada": _format_dose(dose, dose_type),
                 "tipo_dosagem": dose_type,
                 "area_receita": recipe["area_receita"], "area_calculada": calculated_area,
                 "janela_receita": emission_window, "situacao": "RECEITA_SUGERIDA",
