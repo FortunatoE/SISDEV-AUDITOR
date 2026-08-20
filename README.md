@@ -1,18 +1,40 @@
 # SISDEV AUDITOR
 
-Aplicativo local de auditoria e conciliação SAP × SISDEV × AGROTIS.
+Aplicação de auditoria e conciliação de dados SAP, SISDEV e Agrotis.
 
-## Executar
+## Envio de arquivos
 
-No PowerShell, a partir desta pasta:
+No menu **Importar arquivos**, o usuário envia diretamente as fontes abaixo:
+
+- SAP — entradas (`.xlsx`)
+- SAP — saídas (`.xlsx`)
+- SAP — estoque MB52 (`.xlsx`)
+- SISDEV — relatório de movimentações (`.xlsx`)
+- Agrotis — receitas emitidas (`.xls` ou `.xlsx`)
+
+Cada envio substitui apenas a sua própria fonte, com limite de 50 MB. Ao fim,
+clique em **Processar arquivos enviados** para executar a conciliação.
+
+## Executar localmente
+
+Instale as dependências e inicie o servidor:
 
 ```powershell
-& 'C:\Users\Emmanuel Fortunato\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' src\main.py
+python -m pip install -r requirements.txt
+python -B src\main.py
 ```
 
-Abra `http://127.0.0.1:8765`. O botão **Atualizar dados** importa as fontes da
-pasta `dados/`, preserva cada linha original no SQLite e executa a conciliação.
-O aplicativo não realiza lançamentos no SISDEV.
+Abra `http://127.0.0.1:8765`.
+
+## Hospedar na nuvem
+
+O servidor respeita a variável `PORT`, adotada por provedores como Render,
+Railway e Fly.io. O arquivo `Procfile` contém o comando de inicialização.
+
+Para dados persistirem entre reinicializações, configure um volume persistente
+no provedor e monte-o na pasta `dados/` e no arquivo SQLite em `banco/`. Antes
+de disponibilizar a aplicação para terceiros, adicione autenticação e HTTPS:
+as planilhas podem conter informações operacionais e pessoais.
 
 ## Regras iniciais aprovadas
 

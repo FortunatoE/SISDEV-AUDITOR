@@ -2,14 +2,20 @@ import json
 import csv
 import io
 import zipfile
+import cgi
+import os
+import shutil
 from xml.sax.saxutils import escape
 from urllib.parse import parse_qs, urlparse
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from .database import ROOT
-from .engine import dashboard_v2, import_and_reconcile, page_records_v2, validation_rows
+from .engine import SOURCES, dashboard_v2, import_and_reconcile, page_records_v2, validation_rows
 
 STATIC = ROOT / "src" / "web"
+UPLOADS = {source: path for source, path, _ in SOURCES
+           if source in {"sap_entry_current", "sap_exit_current", "sap_stock", "sisdev_movement", "agrotis_recipe"}}
+MAX_UPLOAD_SIZE = 50 * 1024 * 1024
 
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
@@ -25,11 +31,41 @@ class Handler(SimpleHTTPRequestHandler):
             self._export(page, fmt, query); return
         super().do_GET()
     def do_POST(self):
+        if self.path == "/api/upload":
+            try:
+                self._json(self._upload())
+            except ValueError as exc:
+                self._json({"error": str(exc)}, 400)
+            except Exception as exc:
+                self._json({"error": str(exc)}, 500)
+            return
         if self.path == "/api/import":
             try: self._json(import_and_reconcile())
             except Exception as exc: self._json({"error": str(exc)}, 500)
             return
         self.send_error(404)
+
+    def _upload(self):
+        length = int(self.headers.get("Content-Length", 0))
+        if not length or length > MAX_UPLOAD_SIZE:
+            raise ValueError("Envie um arquivo de até 50 MB.")
+        if "multipart/form-data" not in self.headers.get("Content-Type", ""):
+            raise ValueError("Formato de envio inválido.")
+        form = cgi.FieldStorage(fp=self.rfile, headers=self.headers,
+                                environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": self.headers["Content-Type"]})
+        source = form.getfirst("source", "")
+        item = form["file"] if "file" in form else None
+        if source not in UPLOADS:
+            raise ValueError("Fonte de dados inválida.")
+        if not item or not getattr(item, "filename", ""):
+            raise ValueError("Selecione um arquivo para enviar.")
+        if Path(item.filename).suffix.lower() not in {".xlsx", ".xls"}:
+            raise ValueError("Envie uma planilha Excel (.xlsx ou .xls).")
+        target = UPLOADS[source]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("wb") as output:
+            shutil.copyfileobj(item.file, output)
+        return {"ok": True, "source": source, "file": target.name}
     def _json(self, value, status=200):
         raw=json.dumps(value, ensure_ascii=False).encode("utf-8")
         self.send_response(status); self.send_header("Content-Type","application/json; charset=utf-8"); self.send_header("Content-Length",str(len(raw))); self.end_headers(); self.wfile.write(raw)
@@ -57,5 +93,7 @@ def _xlsx(columns, rows):
     return output.getvalue()
 
 def run():
-    print("SISDEV AUDITOR em http://127.0.0.1:8765")
-    ThreadingHTTPServer(("127.0.0.1", 8765), Handler).serve_forever()
+    host = os.getenv("SISDEV_HOST", "127.0.0.1")
+    port = int(os.getenv("PORT", "8765"))
+    print(f"SISDEV AUDITOR em http://{host}:{port}")
+    ThreadingHTTPServer((host, port), Handler).serve_forever()
