@@ -194,6 +194,29 @@ def _recipes_for_regularization(conn, run_id):
     return recipes
 
 
+def preferred_rt(conn):
+    row = conn.execute("SELECT value FROM app_settings WHERE key='preferred_rt'").fetchone()
+    return row["value"] if row else "KARLA DANIELLY GARCIA DE LIMA"
+
+
+def set_preferred_rt(value):
+    conn = connect()
+    conn.execute("INSERT INTO app_settings(key,value,updated_at) VALUES ('preferred_rt',?,CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP", (text(value),))
+    conn.commit(); conn.close()
+
+
+def rt_preference_options():
+    conn = connect()
+    run = conn.execute("SELECT id FROM import_runs WHERE status='SUCCESS' ORDER BY id DESC LIMIT 1").fetchone()
+    if not run:
+        value = preferred_rt(conn)
+        conn.close(); return {"preferred_rt": value, "options": []}
+    options = sorted({recipe["nome_rt"] for recipe in _recipes_for_regularization(conn, run["id"]) if recipe["nome_rt"]})
+    value = preferred_rt(conn)
+    conn.close()
+    return {"preferred_rt": value, "options": options}
+
+
 def _product_matches(left, right):
     left, right = key(left), key(right)
     if not left or not right:
@@ -205,7 +228,7 @@ def _product_matches(left, right):
     return bool(left_terms & right_terms)
 
 
-def _regularization_rows(conn, run_id):
+def _regularization_rows(conn, run_id, preferred_name=None):
     """Operational queue: one SAP line that still needs a SISDEV posting."""
     recipes = _recipes_for_regularization(conn, run_id)
     recipes_by_date = {}
@@ -234,10 +257,13 @@ def _regularization_rows(conn, run_id):
         document_date = datetime.strptime(row["doc_date"], "%Y-%m-%d").date() if row["doc_date"] else None
         date_candidates = [] if not document_date else recipes_by_date.get(document_date.isoformat(), []) + recipes_by_date.get((document_date - timedelta(days=1)).isoformat(), [])
         candidates = [recipe for recipe in date_candidates if _product_matches(row["sap_material"], recipe["produto"])]
+        preferred_candidates = [recipe for recipe in candidates if preferred_name and key(recipe["nome_rt"]) == key(preferred_name)]
+        if len(preferred_candidates) == 1:
+            candidates = preferred_candidates
         if len(candidates) == 1:
             recipe = candidates[0]
             emission_window = "D" if recipe["data_emissao"] == document_date.isoformat() else "D-1"
-            calculated_area = round((row["quantity"] or 0) / recipe["dose_recomendada"], 2) if recipe["dose_recomendada"] else None
+            calculated_area = round((row["quantity"] or 0) / recipe["dose_recomendada"], 6) if recipe["dose_recomendada"] else None
             base.update({
                 "numero_receita": recipe["numero_receita"], "art": recipe["art"], "nome_rt": recipe["nome_rt"],
                 "cultura": recipe["cultura"], "diagnostico": recipe["diagnostico"],
@@ -252,6 +278,21 @@ def _regularization_rows(conn, run_id):
             base.update({"situacao": "SEM_RECEITA", "janela_receita": "D/D-1", "pendencia": "Localizar receita do mesmo dia ou D-1 e informar dados da embalagem."})
         rows.append(base)
     return rows
+
+
+def regularization_export_rows(filters=None):
+    filters = filters or {}
+    conn = connect()
+    run = conn.execute("SELECT id FROM import_runs WHERE status='SUCCESS' ORDER BY id DESC LIMIT 1").fetchone()
+    if not run:
+        conn.close(); return []
+    preference = filters.get("preferred_rt") or preferred_rt(conn)
+    rows = _regularization_rows(conn, run["id"], preference)
+    conn.close()
+    columns = {
+        "Data documento": "data_documento", "CNPJ": "cnpj", "Número de nota fiscal eletrônica": "numero_nf", "Séries": "serie", "Produto": "produto", "Lote": "lote", "Quantidade": "quantidade_sap", "Volume da embalagem": "volume_embalagem", "Quantidade de embalagem": "quantidade_embalagens", "Número de receituário": "numero_receita", "ART": "art", "Nome RT": "nome_rt", "Cultura": "cultura", "Diagnóstico": "diagnostico", "Unidade recebimento de embalagem (URE)": "ure", "Dose recomendada": "dose_recomendada", "Área (quantidade do lote/dose)": "area_calculada",
+    }
+    return [{name: row.get(key_name) for name, key_name in columns.items()} for row in rows if row["direcao"] == "Saída"]
 
 
 def page_records_v2(page, filters=None):
@@ -277,7 +318,7 @@ def page_records_v2(page, filters=None):
         FROM reconciliations r JOIN expected_movements e ON e.id=r.expected_id LEFT JOIN actual_movements a ON a.id=r.actual_id
         WHERE r.run_id=? AND r.status!='CORRETO' ORDER BY e.doc_date DESC,r.id DESC LIMIT 1000""",(run_id,))]
     elif page == "regularization":
-      rows=_regularization_rows(conn, run_id)
+      rows=_regularization_rows(conn, run_id, filters.get("preferred_rt") or preferred_rt(conn))
     elif page == "recipes":
       rows=[]
       for x in conn.execute("SELECT raw_json FROM source_records WHERE run_id=? AND source='agrotis_recipe' ORDER BY row_number LIMIT 500",(run_id,)):

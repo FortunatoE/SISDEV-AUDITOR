@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS expected_movements (id INTEGER PRIMARY KEY, run_id IN
 CREATE TABLE IF NOT EXISTS actual_movements (id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL, source_record_id INTEGER, nf TEXT, series TEXT, movement_type TEXT, movement_date TEXT, product TEXT, product_key TEXT, lot TEXT, quantity REAL, volume REAL, unit TEXT, cnpj TEXT, status TEXT);
 CREATE TABLE IF NOT EXISTS reconciliations (id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL, expected_id INTEGER, actual_id INTEGER, status TEXT NOT NULL, diagnosis TEXT NOT NULL, details_json TEXT, confidence TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS action_history (id INTEGER PRIMARY KEY, reconciliation_id INTEGER, action TEXT NOT NULL, user_name TEXT, reason TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
 """
 
 
@@ -25,4 +26,6 @@ def connect():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES ('preferred_rt','KARLA DANIELLY GARCIA DE LIMA')")
+    conn.commit()
     return conn

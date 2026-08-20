@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, urlparse
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from .database import ROOT
-from .engine import SOURCES, dashboard_v2, import_and_reconcile, page_records_v2, validation_rows
+from .engine import SOURCES, dashboard_v2, import_and_reconcile, page_records_v2, validation_rows, regularization_export_rows, rt_preference_options, set_preferred_rt
 
 STATIC = ROOT / "src" / "web"
 UPLOADS = {source: path for source, path, _ in SOURCES
@@ -24,6 +24,8 @@ class Handler(SimpleHTTPRequestHandler):
         url=urlparse(self.path); query={key:value[-1] for key,value in parse_qs(url.query).items()}
         if url.path == "/api/dashboard":
             self._json(dashboard_v2(query)); return
+        if url.path == "/api/settings/rt-preference":
+            self._json(rt_preference_options()); return
         if url.path.startswith("/api/page/"):
             self._json(page_records_v2(url.path.rsplit("/",1)[-1],query)); return
         if url.path.startswith("/api/export/"):
@@ -31,6 +33,15 @@ class Handler(SimpleHTTPRequestHandler):
             self._export(page, fmt, query); return
         super().do_GET()
     def do_POST(self):
+        if self.path == "/api/settings/rt-preference":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                value = json.loads(self.rfile.read(length) or b"{}").get("preferred_rt", "")
+                set_preferred_rt(value)
+                self._json({"ok": True, "preferred_rt": value})
+            except Exception as exc:
+                self._json({"error": str(exc)}, 400)
+            return
         if self.path == "/api/upload":
             try:
                 self._json(self._upload())
@@ -70,7 +81,10 @@ class Handler(SimpleHTTPRequestHandler):
         raw=json.dumps(value, ensure_ascii=False).encode("utf-8")
         self.send_response(status); self.send_header("Content-Type","application/json; charset=utf-8"); self.send_header("Content-Length",str(len(raw))); self.end_headers(); self.wfile.write(raw)
     def _export(self, page, fmt, query):
-        rows=validation_rows() if page == "reports" else page_records_v2(page,query).get("rows",[]); columns=list(rows[0]) if rows else []
+        if page == "reports": rows=validation_rows()
+        elif page == "regularization": rows=regularization_export_rows(query)
+        else: rows=page_records_v2(page,query).get("rows",[])
+        columns=list(rows[0]) if rows else []
         if fmt == "csv":
             stream=io.StringIO(); writer=csv.DictWriter(stream,fieldnames=columns,extrasaction="ignore"); writer.writeheader(); writer.writerows(rows); data=stream.getvalue().encode("utf-8-sig"); mime="text/csv; charset=utf-8"; ext="csv"
         elif fmt == "xlsx":
