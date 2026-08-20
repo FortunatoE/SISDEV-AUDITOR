@@ -228,6 +228,19 @@ def _product_matches(left, right):
     return bool(left_terms & right_terms)
 
 
+def _normalized_dose(value, dosage_type):
+    """Normalize operational dose units so the area calculation uses kg or L."""
+    dose = number(value)
+    normalized_type = key(dosage_type).replace(" ", "")
+    if dose is None:
+        return None, text(dosage_type)
+    if normalized_type == "gha":
+        return dose / 1000, "kg/ha"
+    if normalized_type == "mlha":
+        return dose / 1000, "L/ha"
+    return dose, text(dosage_type)
+
+
 def _regularization_rows(conn, run_id, preferred_name=None):
     """Operational queue: one SAP line that still needs a SISDEV posting."""
     recipes = _recipes_for_regularization(conn, run_id)
@@ -263,11 +276,13 @@ def _regularization_rows(conn, run_id, preferred_name=None):
         if len(candidates) == 1:
             recipe = candidates[0]
             emission_window = "D" if recipe["data_emissao"] == document_date.isoformat() else "D-1"
-            calculated_area = round((row["quantity"] or 0) / recipe["dose_recomendada"], 6) if recipe["dose_recomendada"] else None
+            dose, dose_type = _normalized_dose(recipe["dose_recomendada"], recipe["tipo_dosagem"])
+            calculated_area = round((row["quantity"] or 0) / dose, 6) if dose else None
             base.update({
                 "numero_receita": recipe["numero_receita"], "art": recipe["art"], "nome_rt": recipe["nome_rt"],
                 "cultura": recipe["cultura"], "diagnostico": recipe["diagnostico"],
-                "dose_recomendada": recipe["dose_recomendada"], "tipo_dosagem": recipe["tipo_dosagem"],
+                "dose_recomendada": f"{dose:g} {dose_type}" if dose is not None and dose_type else dose,
+                "tipo_dosagem": dose_type,
                 "area_receita": recipe["area_receita"], "area_calculada": calculated_area,
                 "janela_receita": emission_window, "situacao": "RECEITA_SUGERIDA",
                 "pendencia": "Validar volume e quantidade de embalagens; receita localizada em " + emission_window + ".",
