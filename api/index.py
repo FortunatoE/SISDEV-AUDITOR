@@ -16,6 +16,7 @@ from auditor.engine import (dashboard_v2, import_and_reconcile, page_records_v2,
                             regularization_export_rows, rt_preference_options,
                             set_preferred_rt, validation_rows)
 from auditor.server import _xlsx
+from auditor.database import connect
 
 STATIC = ROOT / "src" / "web"
 app = Flask(__name__)
@@ -63,7 +64,10 @@ def upload_data():
         return jsonify({"error": "Formato de arquivo inválido para esta fonte."}), 400
     from vercel.blob import BlobClient
     blob = BlobClient().put(f"sisdev/{source}/{secure_filename(upload.filename)}", upload.read(), access="private", add_random_suffix=True)
-    return jsonify({"ok": True, "source": source, "file": upload.filename, "url": blob.url, "pathname": blob.pathname})
+    conn = connect()
+    job = conn.execute("INSERT INTO import_jobs(source,blob_path,status) VALUES (?,?,?) RETURNING id", (source, blob.pathname, "QUEUED")).fetchone()[0]
+    conn.commit(); conn.close()
+    return jsonify({"ok": True, "job_id": job, "source": source, "file": upload.filename, "url": blob.url, "pathname": blob.pathname})
 
 
 @app.get("/api/export/<fmt>/<page>")
