@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -18,6 +19,25 @@ SOURCES = [
     ("agrotis_recipe", DATA / "ReceitasEmitidas.xls", 0),
 ]
 RECIPE_CACHE = {}
+
+def _cloud_sources():
+    """Baixa a versão mais recente de cada fonte do Blob para o disco temporário."""
+    if not os.getenv("BLOB_READ_WRITE_TOKEN"):
+        return {}
+    from vercel.blob import BlobClient
+    client = BlobClient(); latest = {}
+    for blob in client.list(prefix="sisdev/").blobs:
+        parts = blob.pathname.split("/")
+        if len(parts) >= 3: latest[parts[1]] = blob
+    target = Path("/tmp/sisdev")
+    target.mkdir(parents=True, exist_ok=True)
+    files = {}
+    for source, blob in latest.items():
+        data = client.get(blob.url)
+        path = target / Path(blob.pathname).name
+        path.write_bytes(data)
+        files[source] = path
+    return files
 
 
 def field(row, *names):
@@ -39,7 +59,9 @@ def import_and_reconcile():
     run_id = cur.fetchone()[0]
     summary = {"sources": {}, "warnings": []}
     try:
+        cloud = _cloud_sources()
         for source, path, skiprows in SOURCES:
+            path = cloud.get(source, path)
             if not path.exists():
                 summary["warnings"].append(f"Arquivo ausente: {path.name}")
                 continue
