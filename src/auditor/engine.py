@@ -1,6 +1,8 @@
 import hashlib
 import json
 import os
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -24,17 +26,20 @@ def _cloud_sources():
     """Baixa a versão mais recente de cada fonte do Blob para o disco temporário."""
     if not os.getenv("BLOB_READ_WRITE_TOKEN"):
         return {}
-    from vercel.blob import BlobClient, list as list_blobs
-    client = BlobClient(); latest = {}
-    for blob in list_blobs(prefix="sisdev/").blobs:
-        parts = blob.pathname.split("/")
-        if len(parts) >= 3: latest[parts[1]] = blob
+    token = os.environ["BLOB_READ_WRITE_TOKEN"]
+    request = Request("https://blob.vercel-storage.com?" + urlencode({"prefix": "sisdev/"}), headers={"Authorization": f"Bearer {token}", "x-api-version": "7"})
+    with urlopen(request, timeout=30) as response:
+        latest = {}
+        for blob in json.load(response).get("blobs", []):
+            parts = blob["pathname"].split("/")
+            if len(parts) >= 3: latest[parts[1]] = blob
     target = Path("/tmp/sisdev")
     target.mkdir(parents=True, exist_ok=True)
     files = {}
     for source, blob in latest.items():
-        data = client.get(blob.url)
-        path = target / Path(blob.pathname).name
+        with urlopen(Request(blob["url"], headers={"Authorization": f"Bearer {token}"}), timeout=60) as response:
+            data = response.read()
+        path = target / Path(blob["pathname"]).name
         path.write_bytes(data)
         files[source] = path
     return files
