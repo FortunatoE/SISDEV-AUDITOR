@@ -77,7 +77,7 @@ def import_and_reconcile():
 
 
 def _flag_duplicate_sisdev(conn, run_id):
-    rows = conn.execute("SELECT nf,series,product,lot,quantity,volume,unit,COUNT(*) n FROM actual_movements WHERE run_id=? GROUP BY nf,series,product,lot,quantity,volume,unit HAVING n>1", (run_id,)).fetchall()
+    rows = conn.execute("SELECT nf,series,product,lot,quantity,volume,unit,COUNT(*) n FROM actual_movements WHERE run_id=? GROUP BY nf,series,product,lot,quantity,volume,unit HAVING COUNT(*) > 1", (run_id,)).fetchall()
     total = sum(r[7] - 1 for r in rows)
     if total:
         conn.execute("INSERT INTO audit_issues(run_id,severity,category,message,details_json) VALUES (?,?,?,?,?)", (run_id, "ALTA", "DUPLICIDADE_SISDEV", f"{total} registros SISDEV repetidos por chave operacional; aguardando regra de tratamento.", json.dumps({"groups": len(rows), "extra_rows": total})))
