@@ -7,6 +7,7 @@ class Row(dict):
  def __getitem__(self,k): return self.v[k] if isinstance(k,int) else super().__getitem__(k)
 class Cursor:
  def __init__(self,c): self.c=c
+ def __iter__(self): return iter(self.fetchall())
  def fetchone(self): x=self.c.fetchone(); return Row(x) if x else None
  def fetchall(self): return [Row(x) for x in self.c.fetchall()]
 class Connection:
