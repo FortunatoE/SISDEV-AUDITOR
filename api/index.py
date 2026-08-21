@@ -50,6 +50,13 @@ def import_data():
         return jsonify({"error": str(exc)}), 500
 
 
+@app.post("/api/upload")
+def upload_data():
+    # A resposta JSON evita que o cliente tente interpretar a página HTML padrão
+    # enquanto os uploads são persistidos no Blob privado.
+    return jsonify({"error": "O envio em nuvem está sendo preparado para o Blob. Tente novamente após a atualização."}), 503
+
+
 @app.get("/api/export/<fmt>/<page>")
 def export(fmt, page):
     if page == "reports":

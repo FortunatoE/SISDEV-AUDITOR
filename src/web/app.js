@@ -4,7 +4,10 @@ let current='dashboard',optionsLoaded=false,uploaded=0;
 const uploadSources=[
   ['sap_entry_current','SAP — Entradas','entrada_sisdev.xlsx','Notas de venda com retorno para a unidade comercial.'],
   ['sap_exit_current','SAP — Saídas','saída_sisdev.xlsx','Transferências para a unidade produtora.'],
+  ['sap_entry_history','SAP — Entrada (histórico)','entrada_sisdev.xlsx','Histórico de entradas SAP.'],
+  ['sap_exit_history','SAP — Saída (histórico)','saída_sisdev.xlsx','Histórico de saídas SAP.'],
   ['sap_stock','SAP — Estoque','MB52.xlsx','Saldo por centro, material e lote.'],
+  ['sisdev_stock','SISDEV — Estoque','Estoque SISDEV.xlsx','Saldo de estoque exportado do SISDEV.'],
   ['sisdev_movement','SISDEV — Movimentações','Relatório de análise de movimentação','Movimentos de entrada e saída do SISDEV.'],
   ['agrotis_recipe','Agrotis — Receitas','ReceitasEmitidas.xls','Receitas emitidas e dados do responsável técnico.']
 ];
