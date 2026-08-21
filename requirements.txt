@@ -3,3 +3,4 @@ openpyxl>=3.1,<4.0
 xlrd>=2.0,<3.0
 Flask>=3.1,<4.0
 psycopg[binary]>=3.2,<4.0
+vercel>=0.1.0

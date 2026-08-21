@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
+from werkzeug.utils import secure_filename
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -52,9 +53,17 @@ def import_data():
 
 @app.post("/api/upload")
 def upload_data():
-    # A resposta JSON evita que o cliente tente interpretar a página HTML padrão
-    # enquanto os uploads são persistidos no Blob privado.
-    return jsonify({"error": "O envio em nuvem está sendo preparado para o Blob. Tente novamente após a atualização."}), 503
+    source = request.form.get("source", "")
+    upload = request.files.get("file")
+    allowed = {"sap_entry_current", "sap_exit_current", "sap_entry_history", "sap_exit_history", "sap_stock", "sisdev_stock", "sisdev_movement", "agrotis_recipe"}
+    if source not in allowed or not upload or not upload.filename:
+        return jsonify({"error": "Fonte ou arquivo inválido."}), 400
+    extension = Path(upload.filename).suffix.lower()
+    if extension not in ({".pdf"} if source == "sisdev_stock" else {".xlsx", ".xls"}):
+        return jsonify({"error": "Formato de arquivo inválido para esta fonte."}), 400
+    from vercel.blob import BlobClient
+    blob = BlobClient().put(f"sisdev/{source}/{secure_filename(upload.filename)}", upload.read(), access="private", add_random_suffix=True)
+    return jsonify({"ok": True, "source": source, "file": upload.filename, "url": blob.url, "pathname": blob.pathname})
 
 
 @app.get("/api/export/<fmt>/<page>")
