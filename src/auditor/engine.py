@@ -24,9 +24,9 @@ def _cloud_sources():
     """Baixa a versão mais recente de cada fonte do Blob para o disco temporário."""
     if not os.getenv("BLOB_READ_WRITE_TOKEN"):
         return {}
-    from vercel.blob import BlobClient
+    from vercel.blob import BlobClient, list as list_blobs
     client = BlobClient(); latest = {}
-    for blob in client.list(prefix="sisdev/").blobs:
+    for blob in list_blobs(prefix="sisdev/").blobs:
         parts = blob.pathname.split("/")
         if len(parts) >= 3: latest[parts[1]] = blob
     target = Path("/tmp/sisdev")
