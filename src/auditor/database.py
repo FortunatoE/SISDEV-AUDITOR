@@ -13,6 +13,7 @@ class Connection:
  def __init__(self,c): self.c=c
  def execute(self,q,p=None): return Cursor(self.c.execute(q.replace('?','%s'),p or ()))
  def commit(self): self.c.commit()
+ def rollback(self): self.c.rollback()
  def close(self): self.c.close()
 def connect():
  url=os.getenv('DATABASE_URL')

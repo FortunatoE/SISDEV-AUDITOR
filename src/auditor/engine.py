@@ -65,6 +65,10 @@ def import_and_reconcile():
         conn.commit()
         return {"run_id": run_id, **summary}
     except Exception as exc:
+        # PostgreSQL invalida a transação após o primeiro erro; recupere-a antes
+        # de registrar a execução como falha.
+        if hasattr(conn, "rollback"):
+            conn.rollback()
         conn.execute("UPDATE import_runs SET status='FAILED', finished_at=CURRENT_TIMESTAMP, summary_json=? WHERE id=?", (json.dumps({"error": str(exc)}), run_id))
         conn.commit()
         raise
