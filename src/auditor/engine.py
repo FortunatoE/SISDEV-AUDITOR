@@ -58,7 +58,7 @@ def iso_date(value):
     return None if pd.isna(value) else value.date().isoformat()
 
 
-def import_and_reconcile():
+def import_and_reconcile(only_source=None):
     conn = connect()
     cur = conn.execute("INSERT INTO import_runs(status) VALUES ('RUNNING') RETURNING id")
     run_id = cur.fetchone()[0]
@@ -66,6 +66,8 @@ def import_and_reconcile():
     try:
         cloud = _cloud_sources()
         for source, path, skiprows in SOURCES:
+            if only_source and source != only_source:
+                continue
             path = cloud.get(source, path)
             if not path.exists():
                 summary["warnings"].append(f"Arquivo ausente: {path.name}")

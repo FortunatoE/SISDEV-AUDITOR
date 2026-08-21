@@ -52,6 +52,22 @@ def import_data():
         return jsonify({"error": str(exc)}), 500
 
 
+@app.post("/api/import/<int:job_id>")
+def import_job(job_id):
+    conn = connect()
+    job = conn.execute("SELECT source FROM import_jobs WHERE id=?", (job_id,)).fetchone()
+    if not job:
+        conn.close(); return jsonify({"error": "Job não encontrado."}), 404
+    conn.execute("UPDATE import_jobs SET status='PROCESSING', updated_at=CURRENT_TIMESTAMP WHERE id=?", (job_id,)); conn.commit(); conn.close()
+    try:
+        result = import_and_reconcile(job["source"])
+        conn = connect(); conn.execute("UPDATE import_jobs SET status='COMPLETED', updated_at=CURRENT_TIMESTAMP WHERE id=?", (job_id,)); conn.commit(); conn.close()
+        return jsonify(result)
+    except Exception as exc:
+        conn = connect(); conn.execute("UPDATE import_jobs SET status='FAILED', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (str(exc), job_id)); conn.commit(); conn.close()
+        return jsonify({"error": str(exc)}), 500
+
+
 @app.post("/api/upload")
 def upload_data():
     source = request.form.get("source", "")
