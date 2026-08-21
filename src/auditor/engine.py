@@ -35,8 +35,8 @@ def iso_date(value):
 
 def import_and_reconcile():
     conn = connect()
-    cur = conn.execute("INSERT INTO import_runs(status) VALUES ('RUNNING')")
-    run_id = cur.lastrowid
+    cur = conn.execute("INSERT INTO import_runs(status) VALUES ('RUNNING') RETURNING id")
+    run_id = cur.fetchone()[0]
     summary = {"sources": {}, "warnings": []}
     try:
         for source, path, skiprows in SOURCES:
@@ -49,8 +49,7 @@ def import_and_reconcile():
                 data = {str(k): (None if pd.isna(v) else str(v)) for k, v in series.items()}
                 raw = json.dumps(data, ensure_ascii=False, sort_keys=True)
                 fp = hashlib.sha256((source + raw).encode()).hexdigest()
-                conn.execute("INSERT INTO source_records(run_id,source,source_file,row_number,fingerprint,raw_json) VALUES (?,?,?,?,?,?)", (run_id, source, str(path.relative_to(ROOT)), int(index) + skiprows + 2, fp, raw))
-                record_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                record_id = conn.execute("INSERT INTO source_records(run_id,source,source_file,row_number,fingerprint,raw_json) VALUES (?,?,?,?,?,?) RETURNING id", (run_id, source, str(path.relative_to(ROOT)), int(index) + skiprows + 2, fp, raw)).fetchone()[0]
                 if source.startswith("sap_") and source != "sap_stock":
                     conn.execute("INSERT INTO expected_movements(run_id,source_record_id,nf,series,direction,doc_date,sap_material,material_key,lot,manufacturer_lot,quantity,unit,center,cnpj) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
                         run_id, record_id, document(field(data, "Número de nota fiscal eletrônica")), text(field(data, "Séries")), text(field(data, "Direção do movimento")), iso_date(field(data, "Data documento")), text(field(data, "Texto breve material")), key(field(data, "Texto breve material")), lot(field(data, "Lote")), lot(field(data, "Lote Fabricante")), number(field(data, "Quantidade")), unit(field(data, "UMB")), text(field(data, "Centro")), text(field(data, "CNPJ"))))
