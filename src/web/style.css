@@ -42,16 +42,9 @@ aside {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 10px;
   padding: 12px 10px;
+  text-align: center;
   border-bottom: 1px solid #1a3044;
-}
-
-.brand-mark {
-  width: 48px;
-  height: 44px;
-  flex: 0 0 48px;
-  background: url('assets/logo-boa-esperanca.png') left center / auto 44px no-repeat;
 }
 
 .brand strong { font-size: 16px; }
