@@ -3,6 +3,7 @@ dados/
 banco/
 resultados/
 logs/
+tmp/
 config/local.*
 
 # Fontes de referência que podem conter dados empresariais.
@@ -13,6 +14,12 @@ Aderência SISDEV.pbix
 __pycache__/
 *.py[cod]
 .venv/
+node_modules/
+tmp/
+.workflow-data/
+.pytest_cache/
+.coverage
+htmlcov/
 .env
 .DS_Store
 Thumbs.db

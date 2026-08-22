@@ -1,0 +1,27 @@
+# Operational and reference data must never enter a deployment bundle.
+dados/
+banco/
+resultados/
+logs/
+tmp/
+Acompanhamento SISDEV.xlsx
+Aderência SISDEV.pbix
+*.xlsx
+*.xls
+*.pbix
+*.rar
+
+# Local environments, caches, tests and deployment output.
+.venv/
+.vercel/
+.pytest_cache/
+.workflow-data/
+node_modules/
+tests/
+__pycache__/
+*.py[cod]
+
+# Local credentials and agent metadata.
+.env*
+.agents/
+skills-lock.json

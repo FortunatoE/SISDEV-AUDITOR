@@ -1,1 +1,33 @@
-.export-actions{display:flex;justify-content:flex-end;gap:10px;margin:10px 0}.export-actions button{padding:8px 14px}
+.export-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.export-actions button {
+  padding: 8px 14px;
+  background: #1c6ca8;
+  color: #fff;
+}
+
+@media print {
+  aside,
+  header button,
+  .filters,
+  .export-actions {
+    display: none !important;
+  }
+
+  main {
+    width: 100%;
+    margin: 0;
+    padding: 0;
+  }
+
+  body,
+  .panel,
+  th {
+    background: #fff;
+    color: #111;
+  }
+}

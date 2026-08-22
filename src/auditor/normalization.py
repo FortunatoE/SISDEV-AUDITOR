@@ -1,5 +1,6 @@
 import re
 import unicodedata
+import math
 from decimal import Decimal, InvalidOperation
 
 
@@ -36,8 +37,33 @@ def unit(value):
 
 
 def number(value):
-    raw = text(value).replace(".", "").replace(",", ".")
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float, Decimal)):
+        try:
+            parsed = float(value)
+            return parsed if math.isfinite(parsed) else None
+        except (TypeError, ValueError, OverflowError):
+            return None
+    raw = text(value).replace("\u00a0", "").replace(" ", "")
+    if not raw:
+        return None
+    negative = raw.startswith("(") and raw.endswith(")")
+    if negative:
+        raw = raw[1:-1]
+    raw = re.sub(r"[^0-9,\.\-+]", "", raw)
+    if "," in raw and "." in raw:
+        # The last separator is the decimal mark; the other one groups thousands.
+        if raw.rfind(",") > raw.rfind("."):
+            raw = raw.replace(".", "").replace(",", ".")
+        else:
+            raw = raw.replace(",", "")
+    elif "," in raw:
+        raw = raw.replace(".", "").replace(",", ".")
     try:
-        return float(Decimal(raw))
+        parsed = float(Decimal(raw))
+        return -parsed if negative else parsed
     except (InvalidOperation, ValueError):
         return None

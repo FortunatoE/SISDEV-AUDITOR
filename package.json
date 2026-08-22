@@ -1,5 +1,0 @@
-{
-  "private": true,
-  "type": "module",
-  "dependencies": { "workflow": "latest", "@neondatabase/serverless": "latest" }
-}

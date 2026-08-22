@@ -1,4 +1,155 @@
 <!doctype html>
-<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SISDEV AUDITOR</title><link rel="stylesheet" href="style.css"><link rel="stylesheet" href="fixes.css"></head><body>
-<aside><div class="brand"><b>⚗</b><section><strong>SISDEV AUDITOR</strong><small>Auditoria e Conciliação<br>SAP × SISDEV × AGROTIS</small></section></div><nav><a class="active" data-page="dashboard">⌂ Dashboard</a><a data-page="uploads">⇧ Importar arquivos</a><a data-page="pending">◉ Pendências</a><a data-page="analysis">▣ Análises</a><a data-page="invoices">▤ Notas Fiscais</a><a data-page="recipes">☷ Receitas</a><a data-page="movements">⇄ Movimentações</a><a data-page="stocks">▣ Estoques</a><hr><label>CADASTROS / DIMENSÕES</label><a data-page="materials">◈ Materiais</a><a data-page="lots">◇ Lotes</a><a data-page="units">♙ Unidades</a><a data-page="movement_types">⇆ Tipos de Movimento</a><a data-page="units_measure">▤ Unidades de Medida</a><a data-page="rules">⚙ Regras de Conciliação</a><hr><label>RELATÓRIOS</label><a data-page="reports">▤ Relatórios</a><a data-page="history">▱ Histórico</a><a data-page="logs">▤ Logs</a></nav><footer>Fase C · Copiloto/Auditor<br><i></i> Automação desativada</footer></aside>
-<main><header><div><h1 id="title">Dashboard</h1><p id="subtitle">Visão geral da auditoria e conciliação de movimentações de químicos</p></div><button id="import">↻ Atualizar Dados</button></header><section class="filters"><div>Data inicial <input id="from" type="date"></div><div>Data final <input id="to" type="date"></div><div>Centro <select id="center"><option value="">Todos os centros</option></select></div><div>Tipo de operação <select id="direction"><option value="">Todas</option></select></div><button id="apply">Aplicar filtros</button></section><div id="notice" class="notice">Carregando dados...</div><section id="uploads-view" hidden class="panel upload-panel"><h2>Importar arquivos de dados</h2><p class="upload-intro">Envie as planilhas atualizadas. Cada novo arquivo substitui somente a fonte correspondente. Ao terminar, processe os dados para atualizar a auditoria.</p><div id="upload-list" class="upload-list"></div><div class="upload-footer"><span id="upload-status">Nenhum arquivo enviado nesta sessão.</span><button id="process-upload" type="button">Processar arquivos enviados</button></div></section><div id="dashboard-view"><section class="metrics"><article><span>▤</span><small>DOCUMENTOS ANALISADOS</small><strong id="total">-</strong><em>NF distintas do SAP</em></article><article><span class="green">✓</span><small>CORRETOS</small><strong id="correct">-</strong><em id="correctPct">-</em></article><article><span class="yellow">◷</span><small>PENDENTES</small><strong id="pending">-</strong><em>aguardam regra/mapeamento</em></article><article><span class="red">!</span><small>DIVERGENTES</small><strong id="divergent">-</strong><em>lote ou quantidade</em></article><article><span class="purple">×</span><small>NÃO LANÇADOS</small><strong id="unposted">-</strong><em>NF sem SISDEV</em></article><article class="eff"><small>ÍNDICE DE EFICÁCIA</small><div><strong id="efficacy">-</strong><i>Meta: 100%</i></div></article></section><section class="grid"><article class="panel"><h2>Distribuição dos status</h2><div id="donut" class="donut"><b id="donutValue">-</b></div><ul id="legend"></ul></article><article class="panel wide"><h2>Divergências por tipo</h2><div id="bars" class="bars"></div></article><article class="panel"><h2>Alertas de dados</h2><div id="issues" class="issues"></div></article></section><section class="grid lower"><article class="panel wide"><h2>Pendências recentes</h2><table><thead><tr><th>NF</th><th>Data</th><th>Centro</th><th>Material</th><th>Lote fabricante</th><th>Qtd. SAP</th><th>Qtd. SISDEV</th><th>Status</th></tr></thead><tbody id="table"></tbody></table></article><article class="panel"><h2>Regra de estoque</h2><div class="stock"><b>Centro</b><p>SAP × SISDEV por centro.</p><p>Diferença positiva: <strong>necessita saída</strong>.</p><p>Diferença negativa: <strong>necessita entrada</strong>.</p></div></article></section></div><div id="page-view" hidden class="panel"><h2 id="page-heading"></h2><table><thead id="page-head"></thead><tbody id="page-body"></tbody></table></div></main><script src="app.js"></script></body></html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SISDEV AUDITOR</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="export.css">
+</head>
+<body>
+  <aside>
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <section>
+        <strong>SISDEV AUDITOR</strong>
+        <small>Auditoria e Conciliação<br>SAP × SISDEV × AGROTIS</small>
+      </section>
+    </div>
+
+    <nav aria-label="Navegação principal">
+      <a class="active" href="#dashboard" data-page="dashboard">⌂ Dashboard</a>
+      <a href="#uploads" data-page="uploads">⇧ Importar arquivos</a>
+      <a href="#pending" data-page="pending">◉ Pendências</a>
+      <a href="#regularization" data-page="regularization">✓ Regularizar SISDEV</a>
+      <a href="#analysis" data-page="analysis">▣ Análises</a>
+      <a href="#invoices" data-page="invoices">▤ Notas Fiscais</a>
+      <a href="#recipes" data-page="recipes">☷ Receitas</a>
+      <a href="#movements" data-page="movements">⇄ Movimentações</a>
+      <a href="#stocks" data-page="stocks">▣ Estoques</a>
+
+      <hr>
+      <label>CADASTROS / DIMENSÕES</label>
+      <a href="#materials" data-page="materials">◇ Materiais</a>
+      <a href="#lots" data-page="lots">◇ Lotes</a>
+      <a href="#units" data-page="units">♟ Unidades</a>
+      <a href="#movement_types" data-page="movement_types">⇆ Tipos de Movimento</a>
+      <a href="#units_measure" data-page="units_measure">▤ Unidades de Medida</a>
+      <a href="#rules" data-page="rules">⚙ Regras de Conciliação</a>
+
+      <hr>
+      <label>RELATÓRIOS</label>
+      <a href="#reports" data-page="reports">▤ Relatórios</a>
+      <a href="#history" data-page="history">▱ Histórico</a>
+      <a href="#logs" data-page="logs">▤ Logs</a>
+    </nav>
+
+    <footer>Fase C · Copiloto/Auditor<br><i></i> Automação monitorada</footer>
+  </aside>
+
+  <main>
+    <header>
+      <div>
+        <h1 id="title">Dashboard</h1>
+        <p id="subtitle">Visão geral da auditoria e conciliação de movimentações de químicos</p>
+      </div>
+      <button id="refresh-data" type="button">↻ Atualizar dados</button>
+    </header>
+
+    <section id="filters" class="filters" aria-label="Filtros">
+      <label>Data inicial <input id="from" type="date"></label>
+      <label>Data final <input id="to" type="date"></label>
+      <label>Centro
+        <select id="center"><option value="">Todos os centros</option></select>
+      </label>
+      <label>Tipo de operação
+        <select id="direction"><option value="">Todas</option></select>
+      </label>
+      <button id="apply" type="button">Aplicar filtros</button>
+    </section>
+
+    <div id="notice" class="notice" role="status" aria-live="polite">Carregando dados...</div>
+
+    <section id="uploads-view" hidden class="panel upload-panel">
+      <h2>Importar arquivos de dados</h2>
+      <p class="upload-intro">Envie e processe uma fonte por vez. O arquivo original fica no Blob e o andamento permanece disponível mesmo após atualizar a página.</p>
+      <div id="upload-list" class="upload-list"></div>
+      <div class="upload-footer">
+        <span id="upload-status" role="status" aria-live="polite">Aguardando arquivos.</span>
+        <button id="process-upload" type="button">Conciliar fontes concluídas</button>
+      </div>
+    </section>
+
+    <div id="dashboard-view">
+      <section class="metrics">
+        <article><span>▤</span><small>DOCUMENTOS ANALISADOS</small><strong id="total">—</strong><em>NF distintas do SAP</em></article>
+        <article><span class="green">✓</span><small>CORRETOS</small><strong id="correct">—</strong><em id="correctPct">—</em></article>
+        <article><span class="yellow">◷</span><small>PENDENTES</small><strong id="pending">—</strong><em>aguardam regra/mapeamento</em></article>
+        <article><span class="red">!</span><small>DIVERGENTES</small><strong id="divergent">—</strong><em>lote ou quantidade</em></article>
+        <article><span class="purple">×</span><small>NÃO LANÇADOS</small><strong id="unposted">—</strong><em>NF sem SISDEV</em></article>
+        <article class="eff">
+          <small>ÍNDICE DE EFICÁCIA</small>
+          <div class="gauge" id="efficacy-gauge"><strong id="efficacy">—</strong><i>Meta: 100%</i></div>
+        </article>
+        <article class="eff adherence">
+          <small>ADERÊNCIA DE LANÇAMENTOS</small>
+          <div class="gauge" id="adherence-gauge"><strong id="adherence">—</strong><i id="adherenceInfo">Lançados / analisados</i></div>
+        </article>
+      </section>
+
+      <section class="dashboard-grid">
+        <article class="panel">
+          <h2>Distribuição dos status</h2>
+          <div id="donut" class="donut empty"><b id="donutValue">0</b></div>
+          <ul id="legend"></ul>
+        </article>
+        <article class="panel wide">
+          <h2>Divergências por tipo</h2>
+          <div id="bars" class="bars"></div>
+        </article>
+        <article class="panel alerts-panel">
+          <h2>Alertas de dados</h2>
+          <div id="issues" class="issues"></div>
+        </article>
+      </section>
+
+      <section class="lower-grid">
+        <article class="panel wide table-panel">
+          <h2>Pendências recentes</h2>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>NF</th><th>Data</th><th>Centro</th><th>Material</th><th>Lote fabricante</th><th>Qtd. SAP</th><th>Qtd. SISDEV</th><th>Status</th></tr></thead>
+              <tbody id="table"></tbody>
+            </table>
+          </div>
+        </article>
+        <article class="panel">
+          <h2>Regra de estoque</h2>
+          <div class="stock">
+            <b>Centro</b>
+            <p>SAP × SISDEV por centro.</p>
+            <p>Diferença positiva: <strong>necessita saída</strong>.</p>
+            <p>Diferença negativa: <strong>necessita entrada</strong>.</p>
+          </div>
+        </article>
+      </section>
+    </div>
+
+    <section id="page-view" hidden class="panel page-panel">
+      <div class="page-heading-row">
+        <div>
+          <h2 id="page-heading"></h2>
+          <p id="page-description"></p>
+        </div>
+        <div id="page-actions" class="page-actions"></div>
+      </div>
+      <div id="page-summary" hidden class="page-summary"></div>
+      <div class="table-scroll">
+        <table><thead id="page-head"></thead><tbody id="page-body"></tbody></table>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js" defer></script>
+</body>
+</html>
