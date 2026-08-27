@@ -2,7 +2,9 @@
 
 ## Autenticação
 
-O backend Flask valida a sessão em todas as rotas `/api/*`, exceto saúde e login. A senha é armazenada com `scrypt`; a sessão usa um token aleatório, persistido no banco somente como SHA-256. Requisições de escrita também exigem token CSRF.
+O backend Flask valida a sessão em todas as rotas `/api/*`, exceto saúde e login. A senha é armazenada com `scrypt`; a sessão usa um token aleatório, persistido no banco somente como SHA-256. Requisições de escrita também exigem token CSRF. A sessão expira depois de 30 minutos sem atividade e sempre termina após 8 horas desde o login.
+
+Antes de registrar uma ação, a auditoria resolve o ator diretamente em `app_users`. O frontend nunca escolhe o `user_id`. A foreign key permanece ativa; falhas de auditoria em operações críticas continuam bloqueantes, enquanto uma falha secundária do log de exportação é enviada aos logs técnicos sem descartar o arquivo já gerado.
 
 O primeiro administrador é criado exclusivamente por variáveis de ambiente do servidor:
 
@@ -30,4 +32,4 @@ Há duas camadas complementares:
 
 Antes de uma restauração de configuração, execute `POST /api/admin/backups/{id}/restore-test`. O endpoint baixa o objeto privado, valida SHA-256 e estrutura JSON. A restauração efetiva exige `confirm: true` e uma justificativa, e fica registrada na trilha de auditoria.
 
-Migrações devem usar conexão direta, nunca o pooler. Em produção, teste primeiro em uma branch Neon criada a partir do estado atual e valide o diff antes de aplicar à branch principal.
+Migrações devem usar conexão direta, nunca o pooler. Em produção, teste primeiro em uma branch Neon criada a partir do estado atual e valide o diff antes de aplicar à branch principal. Para o endurecimento de sessão e auditoria, aplique `sql/session_audit_hardening.sql`.

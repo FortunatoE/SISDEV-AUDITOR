@@ -18,6 +18,7 @@ node_modules/
 tmp/
 .workflow-data/
 .pytest_cache/
+.tmp_pytest_*/
 .coverage
 htmlcov/
 .env

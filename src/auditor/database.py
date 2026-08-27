@@ -243,7 +243,7 @@ def _security_create_statements(id_type: str, timestamp_type: str) -> list[str]:
         )""",
         f"""CREATE TABLE IF NOT EXISTS user_scopes (
             id {id_type} PRIMARY KEY,
-            user_id BIGINT NOT NULL,
+            user_id BIGINT NOT NULL REFERENCES app_users(id),
             scope_type TEXT NOT NULL,
             scope_value TEXT NOT NULL,
             created_at {timestamp_type} NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -251,7 +251,7 @@ def _security_create_statements(id_type: str, timestamp_type: str) -> list[str]:
         )""",
         f"""CREATE TABLE IF NOT EXISTS auth_sessions (
             id {id_type} PRIMARY KEY,
-            user_id BIGINT NOT NULL,
+            user_id BIGINT NOT NULL REFERENCES app_users(id),
             token_hash TEXT NOT NULL UNIQUE,
             csrf_hash TEXT NOT NULL,
             ip_address TEXT,
@@ -270,7 +270,7 @@ def _security_create_statements(id_type: str, timestamp_type: str) -> list[str]:
         )""",
         f"""CREATE TABLE IF NOT EXISTS audit_log (
             id {id_type} PRIMARY KEY,
-            user_id BIGINT,
+            user_id BIGINT REFERENCES app_users(id),
             user_email TEXT,
             action TEXT NOT NULL,
             module TEXT NOT NULL,
@@ -285,7 +285,7 @@ def _security_create_statements(id_type: str, timestamp_type: str) -> list[str]:
         )""",
         f"""CREATE TABLE IF NOT EXISTS backup_registry (
             id {id_type} PRIMARY KEY,
-            requested_by BIGINT,
+            requested_by BIGINT REFERENCES app_users(id),
             provider TEXT NOT NULL,
             storage_path TEXT,
             checksum TEXT,
@@ -313,6 +313,7 @@ INDEX_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS app_users_profile_idx ON app_users(profile, active)",
     "CREATE INDEX IF NOT EXISTS user_scopes_user_idx ON user_scopes(user_id, scope_type)",
     "CREATE INDEX IF NOT EXISTS auth_sessions_user_idx ON auth_sessions(user_id, expires_at)",
+    "CREATE INDEX IF NOT EXISTS auth_sessions_validation_idx ON auth_sessions(token_hash, revoked_at, expires_at, last_seen_at)",
     "CREATE INDEX IF NOT EXISTS login_attempts_identity_idx ON login_attempts(email, ip_address, created_at)",
     "CREATE INDEX IF NOT EXISTS audit_log_created_idx ON audit_log(created_at)",
     "CREATE INDEX IF NOT EXISTS audit_log_user_idx ON audit_log(user_id, created_at)",

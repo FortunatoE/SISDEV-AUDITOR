@@ -187,6 +187,7 @@ Antes da primeira publicação da fila, execute no Neon:
 ```text
 sql/import_jobs.sql
 sql/security_access.sql
+sql/session_audit_hardening.sql
 ```
 
 Os scripts são idempotentes e podem ser reaplicados em atualizações de schema. Use conexão direta para a migração e a conexão pooled para a aplicação.
@@ -222,11 +223,12 @@ vercel deploy --prod
 - A autorização combina usuário, perfil, permissão e escopo e é validada no backend.
 - Senhas usam hash `scrypt`; tentativas falhas são registradas e limitadas temporariamente.
 - Cookies são `HttpOnly`, `Secure` em produção e `SameSite=Lax`; logout revoga a sessão no banco.
+- A sessão expira após 30 minutos sem atividade e possui limite absoluto de 8 horas, mesmo com uso contínuo.
 - Arquivos originais são gravados como privados no Blob e suas URLs não são devolvidas nas APIs.
 - Uploads validam extensão, assinatura, ZIP XLSX, presença de macros, tamanho, estrutura, colunas e limites de linhas/colunas.
 - CSV e XLSX neutralizam células iniciadas como fórmulas.
 - Segredos e credenciais permanecem exclusivamente no backend e em variáveis de ambiente.
-- Logs de auditoria não possuem rota comum de exclusão.
+- Logs de auditoria resolvem o usuário autenticado em `app_users` antes da gravação e não possuem rota comum de exclusão. Uma indisponibilidade secundária do log é registrada tecnicamente, mas não invalida uma exportação já gerada.
 - O backup principal do banco é o point-in-time restore do Neon; o sistema adiciona snapshots privados das configurações e um teste explícito de restauração.
 
 Detalhes operacionais estão em `docs/SECURITY_AND_BACKUP.md`.

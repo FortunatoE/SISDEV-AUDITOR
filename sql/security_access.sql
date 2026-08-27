@@ -77,6 +77,8 @@ CREATE TABLE IF NOT EXISTS backup_registry (
 CREATE INDEX IF NOT EXISTS app_users_profile_idx ON app_users(profile, active);
 CREATE INDEX IF NOT EXISTS user_scopes_user_idx ON user_scopes(user_id, scope_type);
 CREATE INDEX IF NOT EXISTS auth_sessions_user_idx ON auth_sessions(user_id, expires_at);
+CREATE INDEX IF NOT EXISTS auth_sessions_validation_idx
+  ON auth_sessions(token_hash, revoked_at, expires_at, last_seen_at);
 CREATE INDEX IF NOT EXISTS login_attempts_identity_idx ON login_attempts(email, ip_address, created_at);
 CREATE INDEX IF NOT EXISTS audit_log_created_idx ON audit_log(created_at);
 CREATE INDEX IF NOT EXISTS audit_log_user_idx ON audit_log(user_id, created_at);

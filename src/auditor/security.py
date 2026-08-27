@@ -22,6 +22,14 @@ from .normalization import key, text
 
 PROFILES = ("ADMINISTRADOR", "GESTOR", "AUDITOR", "OPERADOR", "CONSULTA")
 
+SESSION_IDLE_MINUTES = 30
+SESSION_ABSOLUTE_HOURS = 8
+
+
+class AuditIdentityError(RuntimeError):
+    """Raised when an authenticated audit actor cannot be resolved safely."""
+
+
 PROFILE_PERMISSIONS: dict[str, set[str]] = {
     "ADMINISTRADOR": {"*"},
     "GESTOR": {
@@ -44,6 +52,26 @@ PROFILE_MODULES: dict[str, set[str]] = {
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _as_utc(value: Any) -> datetime | None:
+    """Normalize SQLite text and PostgreSQL timestamps for session checks."""
+
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        raw = str(value).strip()
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _hash_token(value: str) -> str:
@@ -206,7 +234,12 @@ def authenticate(email: str, password: str, ip_address: str = "") -> tuple[dict[
         connection.close()
 
 
-def create_session(user_id: int, ip_address: str = "", user_agent: str = "", hours: int = 8) -> tuple[str, str]:
+def create_session(
+    user_id: int,
+    ip_address: str = "",
+    user_agent: str = "",
+    hours: int = SESSION_ABSOLUTE_HOURS,
+) -> tuple[str, str]:
     token = secrets.token_urlsafe(48)
     csrf = secrets.token_urlsafe(32)
     expires = _utcnow() + timedelta(hours=max(1, min(hours, 24)))
@@ -224,7 +257,11 @@ def create_session(user_id: int, ip_address: str = "", user_agent: str = "", hou
 
 
 def validate_session(
-    token: str, csrf: str | None = None, *, user_agent: str | None = None
+    token: str,
+    csrf: str | None = None,
+    *,
+    user_agent: str | None = None,
+    touch: bool = True,
 ) -> dict[str, Any] | None:
     if not token:
         return None
@@ -233,10 +270,21 @@ def validate_session(
         row = connection.execute(
             """SELECT s.*,u.email,u.display_name,u.profile,u.active,u.password_hash
                FROM auth_sessions s JOIN app_users u ON u.id=s.user_id
-               WHERE s.token_hash=? AND s.revoked_at IS NULL AND s.expires_at>CURRENT_TIMESTAMP""",
+               WHERE s.token_hash=? AND s.revoked_at IS NULL""",
             (_hash_token(token),),
         ).fetchone()
         if row is None or not row["active"]:
+            return None
+        now = _utcnow()
+        expires_at = _as_utc(row["expires_at"])
+        last_seen_at = _as_utc(row["last_seen_at"])
+        idle_cutoff = now - timedelta(minutes=SESSION_IDLE_MINUTES)
+        if expires_at is None or expires_at <= now or last_seen_at is None or last_seen_at <= idle_cutoff:
+            connection.execute(
+                "UPDATE auth_sessions SET revoked_at=CURRENT_TIMESTAMP WHERE id=? AND revoked_at IS NULL",
+                (row["id"],),
+            )
+            connection.commit()
             return None
         if user_agent is not None and not hmac.compare_digest(
             text(row["user_agent"]), text(user_agent)[:500]
@@ -244,8 +292,9 @@ def validate_session(
             return None
         if csrf is not None and not hmac.compare_digest(row["csrf_hash"], _hash_token(csrf)):
             return None
-        connection.execute("UPDATE auth_sessions SET last_seen_at=CURRENT_TIMESTAMP WHERE id=?", (row["id"],))
-        connection.commit()
+        if touch:
+            connection.execute("UPDATE auth_sessions SET last_seen_at=CURRENT_TIMESTAMP WHERE id=?", (row["id"],))
+            connection.commit()
         return public_user(row, connection=connection)
     finally:
         connection.close()
@@ -283,19 +332,45 @@ def record_audit(
 
     connection = connect()
     try:
+        resolved_user_id = None
+        resolved_user_email = None
+        if user:
+            requested_id = user.get("id")
+            actor = None
+            if requested_id is not None:
+                try:
+                    actor = connection.execute(
+                        "SELECT id,email FROM app_users WHERE id=?", (int(requested_id),)
+                    ).fetchone()
+                except (TypeError, ValueError):
+                    actor = None
+            requested_email = normalize_email(user.get("email"))
+            if actor is None and requested_email:
+                actor = connection.execute(
+                    "SELECT id,email FROM app_users WHERE email=?", (requested_email,)
+                ).fetchone()
+            if actor is None:
+                raise AuditIdentityError(
+                    "O usuário autenticado não existe em app_users; a auditoria foi rejeitada."
+                )
+            resolved_user_id = int(actor["id"])
+            resolved_user_email = actor["email"]
         connection.execute(
             """INSERT INTO audit_log(
                  user_id,user_email,action,module,entity_type,entity_id,old_value_json,
                  new_value_json,justification,result,ip_address
                ) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (
-                user.get("id") if user else None,
-                user.get("email") if user else None,
+                resolved_user_id,
+                resolved_user_email,
                 key(action), key(module), text(entity_type), text(entity_id),
                 encoded(old_value), encoded(new_value), text(justification), key(result), ip_address,
             ),
         )
         connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
     finally:
         connection.close()
 

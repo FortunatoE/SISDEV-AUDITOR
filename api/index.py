@@ -118,11 +118,40 @@ def _current_user() -> dict[str, Any] | None:
     return getattr(g, "current_user", None)
 
 
-def _audit(action: str, module: str, result: str = "SUCCESS", **kwargs: Any) -> None:
-    record_audit(
-        user=_current_user(), action=action, module=module, result=result,
-        ip_address=_client_ip(), **kwargs,
-    )
+def _audit(
+    action: str,
+    module: str,
+    result: str = "SUCCESS",
+    *,
+    critical: bool = True,
+    **kwargs: Any,
+) -> bool:
+    """Record an authenticated action and optionally tolerate log outages.
+
+    Critical mutations remain fail-closed. Read/export operations may choose a
+    best-effort audit so a secondary logging failure does not discard a valid
+    response that has already been generated.
+    """
+
+    actor = _current_user()
+    if app.testing and app.config.get("AUTH_DISABLED"):
+        actor = None
+    try:
+        record_audit(
+            user=actor, action=action, module=module, result=result,
+            ip_address=_client_ip(), **kwargs,
+        )
+        return True
+    except Exception:
+        app.logger.exception(
+            "Audit logging failed action=%s module=%s critical=%s",
+            action,
+            module,
+            critical,
+        )
+        if critical:
+            raise
+        return False
 
 
 def _configuration_snapshot() -> bytes:
@@ -197,15 +226,20 @@ def enforce_security():
         return None
     token = str(session.get("auth_token") or "")
     user_agent = request.headers.get("User-Agent", "")
-    user = validate_session(token, user_agent=user_agent)
+    mutating = request.method not in {"GET", "HEAD", "OPTIONS"}
+    user = validate_session(token, user_agent=user_agent, touch=not mutating)
     if not user:
         session.clear()
         return jsonify({"error": "Autenticação necessária.", "code": "AUTH_REQUIRED"}), 401
     g.current_user = user
-    if request.method not in {"GET", "HEAD", "OPTIONS"}:
+    if mutating:
         csrf = request.headers.get("X-CSRF-Token", "")
-        if not csrf or not validate_session(token, csrf, user_agent=user_agent):
+        if not csrf:
             return jsonify({"error": "Sessão inválida ou expirada.", "code": "CSRF_INVALID"}), 403
+        confirmed_user = validate_session(token, csrf, user_agent=user_agent)
+        if not confirmed_user:
+            return jsonify({"error": "Sessão inválida ou expirada.", "code": "CSRF_INVALID"}), 403
+        g.current_user = confirmed_user
     permission = ENDPOINT_PERMISSIONS.get(request.endpoint or "", "view")
     if not has_permission(user, permission):
         return jsonify({"error": "Você não possui permissão para esta operação.", "code": "FORBIDDEN"}), 403
@@ -1211,6 +1245,7 @@ def export(fmt: str, page_name: str):
     _audit(
         "EXPORT", "EXPORTS", entity_type="PAGE", entity_id=page_name,
         new_value={"format": fmt, "records": len(rows), "filters": filters},
+        critical=False,
     )
     return response
 
