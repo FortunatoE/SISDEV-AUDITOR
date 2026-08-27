@@ -28,6 +28,36 @@ SOURCES = [
 SOURCE_BY_NAME = {source: (path, skiprows) for source, path, skiprows in SOURCES}
 REQUIRED_SOURCES = set(SOURCE_BY_NAME)
 RECIPE_CACHE = {}
+PAGE_SIZES = {25, 50, 100, 250}
+MAX_SOURCE_ROWS = 250_000
+MAX_SOURCE_COLUMNS = 200
+
+SITUATION_DESCRIPTIONS = {
+    "PENDENTE": "Aguardando regularização no SISDEV",
+    "REGULARIZADO": "Movimento conciliado",
+    "SEM_RECEITA": "Receita agronômica não localizada em D ou D-1",
+    "RECEITAS_MULTIPLAS": "Mais de uma receita compatível foi localizada",
+    "DIVERGENTE": "Dados divergentes entre NF, SAP e SISDEV",
+    "LOTE_NAO_MAPEADO": "Lote sem correspondência confiável",
+    "MATERIAL_NAO_MAPEADO": "Material sem correspondência confiável",
+    "SALDO_PARCIAL": "Saldo SISDEV insuficiente para a quantidade necessária",
+    "SEM_SALDO": "Nenhum saldo SISDEV disponível para o lote",
+    "ERRO_CONCILIACAO": "A conciliação não pôde ser concluída",
+    "OK": "Dados disponíveis para conferência e regularização",
+}
+
+RECOMMENDED_ACTIONS = {
+    "SEM_RECEITA": "Localizar ou emitir a receita agronômica correspondente.",
+    "RECEITAS_MULTIPLAS": "Verificar e selecionar a receita correta.",
+    "SEM_SALDO": "Verificar movimentações anteriores do lote.",
+    "SALDO_PARCIAL": "Verificar a quantidade disponível e a divergência de saldo.",
+    "LOTE_NAO_MAPEADO": "Cadastrar ou sugerir a correspondência do lote.",
+    "MATERIAL_NAO_MAPEADO": "Cadastrar ou sugerir a correspondência do material.",
+    "DIVERGENTE": "Conferir os dados da NF, SAP e SISDEV.",
+    "PENDENTE": "Conferir os dados e realizar o lançamento no SISDEV.",
+    "OK": "Conferir os dados apresentados e realizar o lançamento no SISDEV.",
+    "ERRO_CONCILIACAO": "Revisar os dados de origem e executar novamente a conciliação.",
+}
 
 REQUIRED_COLUMNS = {
     "sap_entry_current": {"Número de nota fiscal eletrônica", "Séries", "Texto breve material", "Quantidade"},
@@ -227,9 +257,15 @@ def _read_source(source, path):
     path = Path(path)
     if source == "sisdev_stock":
         parsed = _parse_sisdev_stock_pdf(path)
+        if len(parsed) > MAX_SOURCE_ROWS:
+            raise ValueError(f"Fonte {source}: quantidade de registros acima do limite de {MAX_SOURCE_ROWS}.")
         return [(int(row.pop("_row_number")), row) for row in parsed]
     skiprows = SOURCE_BY_NAME[source][1]
     frame = pd.read_excel(path, skiprows=skiprows, dtype=object).dropna(axis=1, how="all")
+    if len(frame.columns) > MAX_SOURCE_COLUMNS:
+        raise ValueError(f"Fonte {source}: quantidade de colunas acima do limite de {MAX_SOURCE_COLUMNS}.")
+    if len(frame.index) > MAX_SOURCE_ROWS:
+        raise ValueError(f"Fonte {source}: quantidade de registros acima do limite de {MAX_SOURCE_ROWS}.")
     _validate_columns(source, frame.columns)
     rows = []
     for index, series in frame.iterrows():
@@ -734,11 +770,87 @@ def _filter_sql(filters, alias="e"):
     for request_key, column in (
         ("from", f"{alias}.doc_date >= ?"), ("to", f"{alias}.doc_date <= ?"),
         ("center", f"{alias}.center = ?"), ("direction", f"{alias}.direction = ?"),
+        ("nf", f"{alias}.nf = ?"),
     ):
         if filters.get(request_key):
             clauses.append(column)
             params.append(filters[request_key])
+    allowed_centers = filters.get("allowed_centers")
+    if allowed_centers is not None:
+        allowed_centers = [text(value) for value in allowed_centers if text(value)]
+        if not allowed_centers:
+            clauses.append("1=0")
+        else:
+            placeholders = ",".join("?" for _ in allowed_centers)
+            clauses.append(f"{alias}.center IN ({placeholders})")
+            params.extend(allowed_centers)
     return (" AND " + " AND ".join(clauses) if clauses else ""), params
+
+
+def _page_spec(filters):
+    try:
+        page = max(1, int((filters or {}).get("page", 1)))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        per_page = int((filters or {}).get("per_page", 50))
+    except (TypeError, ValueError):
+        per_page = 50
+    if per_page not in PAGE_SIZES:
+        per_page = 50
+    return page, per_page
+
+
+def _sort_rows(rows, filters):
+    requested = text((filters or {}).get("sort"))
+    if not requested or not rows or requested not in rows[0]:
+        return rows
+    reverse = key((filters or {}).get("order")) == "DESC"
+
+    def sortable(row):
+        value = row.get(requested)
+        if isinstance(value, (int, float)):
+            return (0, value)
+        return (1, key(value))
+
+    return sorted(rows, key=sortable, reverse=reverse)
+
+
+def _paginate_rows(rows, filters):
+    rows = _sort_rows(list(rows), filters)
+    total = len(rows)
+    if str((filters or {}).get("export", "")) == "1":
+        return rows, {
+            "page": 1, "per_page": total or 50, "total": total,
+            "total_pages": 1 if total else 0, "from": 1 if total else 0, "to": total,
+        }
+    page, per_page = _page_spec(filters)
+    total_pages = (total + per_page - 1) // per_page if total else 0
+    if total_pages and page > total_pages:
+        page = total_pages
+    start = (page - 1) * per_page
+    paged = rows[start:start + per_page]
+    return paged, {
+        "page": page, "per_page": per_page, "total": total, "total_pages": total_pages,
+        "from": start + 1 if paged else 0, "to": start + len(paged),
+    }
+
+
+def _operational_status(status, diagnosis):
+    status_code, diagnosis_code = key(status), key(diagnosis)
+    if status_code == "CORRETO":
+        return "REGULARIZADO"
+    if "MATERIAL" in diagnosis_code and ("MAP" in diagnosis_code or "DESCONHEC" in diagnosis_code):
+        return "MATERIAL_NAO_MAPEADO"
+    if "LOTE" in diagnosis_code and ("MAP" in diagnosis_code or "DIVERG" in diagnosis_code):
+        return "LOTE_NAO_MAPEADO"
+    if status_code == "NAO_LANCADO":
+        return "PENDENTE"
+    if "DIVERG" in status_code or "DIVERG" in diagnosis_code or "QUANTIDADE" in status_code:
+        return "DIVERGENTE"
+    if "PENDENTE" in status_code:
+        return "PENDENTE"
+    return "ERRO_CONCILIACAO"
 
 
 def dashboard_v2(filters=None):
@@ -772,6 +884,9 @@ def dashboard_v2(filters=None):
                        for row in conn.execute("SELECT DISTINCT direction FROM expected_movements WHERE run_id=? ORDER BY 1", (run["id"],))],
         "range": dict(conn.execute("SELECT MIN(doc_date) min_date,MAX(doc_date) max_date FROM expected_movements WHERE run_id=?", (run["id"],)).fetchone()),
     }
+    if filters.get("allowed_centers") is not None:
+        allowed = {text(value) for value in filters.get("allowed_centers") or []}
+        options["centers"] = [value for value in options["centers"] if value in allowed]
     issues = [dict(row) for row in conn.execute("SELECT severity,category,message FROM audit_issues WHERE run_id=? ORDER BY id DESC LIMIT 8", (run["id"],))]
     total = sum(statuses.values())
     correct = statuses["CORRETO"]
@@ -927,15 +1042,63 @@ def _select_recipe(recipes, expected_row, preferred_name=None, product_mappings=
     return None, candidates
 
 
+def _stock_lookup(conn, run_id):
+    index = {}
+    for row in _stock_rows(conn, run_id):
+        center = text(row.get("centro"))
+        product = key(row.get("material"))
+        product_lot = lot(row.get("lote_fabricante") or row.get("lote"))
+        measure = unit(row.get("unidade"))
+        index[(center, product, product_lot, measure)] = row
+        index.setdefault((center, product, product_lot, ""), row)
+    return index
+
+
+def _quantity_label(value, measure):
+    shown = f"{float(value or 0):,.3f}".replace(",", "_").replace(".", ",").replace("_", ".")
+    shown = shown.rstrip("0").rstrip(",")
+    return f"{shown} {measure}".strip()
+
+
+def _balance_diagnostic(stock_row, required, measure):
+    available = float((stock_row or {}).get("quantidade_sisdev") or 0)
+    required = abs(float(required or 0))
+    after = available - required
+    missing = max(0.0, -after)
+    if available <= 0:
+        code = "SEM_SALDO"
+    elif after < -0.000001:
+        code = "SALDO_PARCIAL"
+    else:
+        code = "OK"
+    if code == "OK":
+        message = f"Saldo disponível: {_quantity_label(available, measure)} — Após lançamento: {_quantity_label(after, measure)} — OK"
+    else:
+        message = (
+            f"Saldo disponível: {_quantity_label(available, measure)} — "
+            f"Necessário: {_quantity_label(required, measure)} — Falta: {_quantity_label(missing, measure)}"
+        )
+    return {
+        "status_saldo_codigo": code,
+        "status_saldo": message,
+        "saldo_disponivel": round(available, 6),
+        "saldo_necessario": round(required, 6),
+        "saldo_apos_lancamento": round(after, 6),
+        "falta_saldo": round(missing, 6),
+        "saldo_unidade": measure,
+    }
+
+
 def _regularization_rows(conn, run_id, preferred_name=None, filters=None):
     recipes = _recipes_for_regularization(conn, run_id)
     recipe_index = _recipe_date_index(recipes)
     product_mappings = _mapping_dict(conn, "material_product")
     property_cnpj = _property_cnpj_map(conn)
+    stock = _stock_lookup(conn, run_id)
     where, params = _filter_sql(filters)
     expected = conn.execute(
         """SELECT e.doc_date,e.cnpj,e.nf,e.series,e.direction,e.sap_material,e.lot,e.manufacturer_lot,
-        e.quantity,e.unit,e.center,s.raw_json FROM reconciliations r
+        e.quantity,e.unit,e.center,r.status reconciliation_status,r.diagnosis,r.confidence,s.raw_json FROM reconciliations r
         JOIN expected_movements e ON e.id=r.expected_id JOIN source_records s ON s.id=e.source_record_id
         WHERE r.run_id=? AND r.status='NAO_LANCADO'""" + where +
         " ORDER BY e.doc_date DESC,e.nf,e.id", [run_id, *params],
@@ -953,12 +1116,30 @@ def _regularization_rows(conn, run_id, preferred_name=None, filters=None):
             "unidade_sap": row["unit"], "ure": row["center"],
             "volume_embalagem": number(field(raw, "Volume da Embalagens", "Volume da Embalagem")),
             "quantidade_embalagens": number(field(raw, "Quantidade de Embalagens", "Quantidade de Embalagem")),
+            "fornecedor": text(field(raw, "Fornecedor", "Nome fornecedor")),
+            "centro": row["center"],
+            "status_conciliacao": row["reconciliation_status"],
+            "confianca": row["confidence"],
         }
         base["quantidade_embalagem"] = base["quantidade_embalagens"]
         if direction == "Entrada":
-            base.update({"situacao": "PRONTO_PARA_REGULARIZAR", "pendencia": "Conferir embalagem e efetuar o lançamento de entrada."})
+            base.update({
+                "situacao": "PENDENTE",
+                "situacao_descricao": SITUATION_DESCRIPTIONS["PENDENTE"],
+                "status_saldo_codigo": "NAO_APLICAVEL",
+                "status_saldo": "Não aplicável à regularização de entrada.",
+                "acao_recomendada": "Conferir NF, embalagem e realizar o lançamento de entrada no SISDEV.",
+                "classificacao_automacao": "REVISAO_HUMANA",
+                "pendencia": "Conferir embalagem e efetuar o lançamento de entrada.",
+            })
             rows.append(base)
             continue
+        preferred_product = product_mappings.get(key(_product_name(row["sap_material"])), key(_product_name(row["sap_material"])))
+        preferred_lot = lot(row["manufacturer_lot"] or row["lot"])
+        stock_row = stock.get((text(row["center"]), preferred_product, preferred_lot, unit(row["unit"])))
+        if stock_row is None:
+            stock_row = stock.get((text(row["center"]), preferred_product, preferred_lot, ""))
+        base.update(_balance_diagnostic(stock_row, row["quantity"], unit(row["unit"])))
         recipe, candidates = _select_recipe(recipe_index, row, preferred_name, product_mappings, property_cnpj)
         if recipe:
             emission_window = "D" if recipe["data_emissao"] == row["doc_date"] else "D-1"
@@ -971,14 +1152,39 @@ def _regularization_rows(conn, run_id, preferred_name=None, filters=None):
                 "nome_propriedade": recipe["nome_propriedade"], "dose_recomendada": _format_dose(dose, dose_type),
                 "tipo_dosagem": dose_type, "area_receita": recipe["area_receita"],
                 "area_calculada": calculated_area, "area": calculated_area,
-                "janela_receita": emission_window, "situacao": "RECEITA_SUGERIDA",
+                "janela_receita": emission_window,
                 "pendencia": "Conferir dados e efetuar o lançamento de saída.",
             })
-        elif candidates:
-            base.update({"situacao": "RECEITAS_MULTIPLAS", "janela_receita": "D/D-1", "pendencia": f"Selecionar uma entre {len(candidates)} receitas candidatas."})
+        if not row["sap_material"]:
+            situation = "MATERIAL_NAO_MAPEADO"
+        elif not preferred_lot:
+            situation = "LOTE_NAO_MAPEADO"
+        elif candidates and recipe is None:
+            situation = "RECEITAS_MULTIPLAS"
+            base.update({"janela_receita": "D/D-1", "pendencia": f"Selecionar uma entre {len(candidates)} receitas candidatas."})
+        elif recipe is None:
+            situation = "SEM_RECEITA"
+            base.update({"janela_receita": "D/D-1", "pendencia": "Localizar receita compatível emitida em D ou D-1."})
+        elif base["status_saldo_codigo"] in {"SEM_SALDO", "SALDO_PARCIAL"}:
+            situation = base["status_saldo_codigo"]
+        elif key(row["reconciliation_status"]) not in {"NAO_LANCADO", "CORRETO"}:
+            situation = "DIVERGENTE"
         else:
-            base.update({"situacao": "SEM_RECEITA", "janela_receita": "D/D-1", "pendencia": "Localizar receita compatível emitida em D ou D-1."})
+            situation = "OK"
+        base.update({
+            "situacao": situation,
+            "situacao_descricao": SITUATION_DESCRIPTIONS[situation],
+            "acao_recomendada": RECOMMENDED_ACTIONS[situation],
+            "classificacao_automacao": "CANDIDATO_AUTOMACAO" if situation == "OK" and key(row["confidence"]) == "ALTA" else "REVISAO_HUMANA",
+        })
         rows.append(base)
+    requested_status = key((filters or {}).get("status"))
+    if requested_status and requested_status != "TODOS":
+        rows = [row for row in rows if key(row.get("situacao")) == requested_status or key(row.get("status_saldo_codigo")) == requested_status]
+    allowed_properties = (filters or {}).get("allowed_properties")
+    if allowed_properties is not None:
+        allowed = {key(value) for value in allowed_properties if text(value)}
+        rows = [row for row in rows if key(row.get("nome_propriedade")) in allowed] if allowed else []
     return rows
 
 
@@ -1000,7 +1206,16 @@ def regularization_export_rows(filters=None):
         "Diagnóstico": "diagnostico", "Unidade recebimento de embalagem (URE)": "ure",
         "Dose recomendada": "dose_recomendada", "Área (quantidade do lote/dose)": "area_calculada",
     }
-    return [{name: row.get(source_name) for name, source_name in columns.items()} for row in rows if row["direcao"] == "Saída"]
+    result = []
+    for row in rows:
+        selected = {name: row.get(source_name) for name, source_name in columns.items()}
+        selected["Situação"] = row.get("situacao")
+        selected["Status saldo"] = row.get("status_saldo")
+        selected["Ação recomendada"] = row.get("acao_recomendada")
+        if row.get("data_documento"):
+            selected["Data documento"] = datetime.strptime(row["data_documento"], "%Y-%m-%d").strftime("%d/%m/%Y")
+        result.append(selected)
+    return result
 
 
 def _setting_map(conn, setting_key):
@@ -1213,14 +1428,55 @@ def page_records_v2(page, filters=None):
 
     if page == "pending":
         rows = [dict(row) for row in conn.execute(
-            """SELECT r.status,r.diagnosis,r.confidence,e.nf,e.series,e.doc_date,e.center,
+            """SELECT r.id reconciliation_id,r.status,r.diagnosis,r.confidence,e.nf,e.series,e.doc_date,e.center,
             CASE e.direction WHEN '1' THEN 'Entrada' WHEN '2' THEN 'Saída' ELSE e.direction END direcao,
             e.sap_material,e.lot lote_sap,e.manufacturer_lot lote_fabricante,e.quantity quantidade_sap,e.unit unidade_sap,
             a.product produto_sisdev,a.lot lote_sisdev,ABS(a.quantity*a.volume) quantidade_sisdev
             FROM reconciliations r JOIN expected_movements e ON e.id=r.expected_id LEFT JOIN actual_movements a ON a.id=r.actual_id
-            WHERE r.run_id=?""" + expected_where + " AND r.status!='CORRETO' ORDER BY e.doc_date DESC,r.id DESC",
+            WHERE r.run_id=?""" + expected_where + " ORDER BY e.doc_date DESC,r.id DESC",
             [run_id, *expected_params],
         )]
+        for row in rows:
+            original = row["status"]
+            operational = _operational_status(original, row.get("diagnosis"))
+            row["status_original"] = original
+            row["status"] = operational
+            row["situacao_descricao"] = SITUATION_DESCRIPTIONS.get(operational, operational)
+            row["acao_recomendada"] = RECOMMENDED_ACTIONS.get(operational, "Revisar a conciliação.")
+            row["classificacao_automacao"] = (
+                "CANDIDATO_AUTOMACAO"
+                if operational == "REGULARIZADO" and key(row.get("confidence")) == "ALTA"
+                else "REVISAO_HUMANA"
+            )
+        requested_status = key(filters.get("status"))
+        detailed_statuses = {
+            "SEM_RECEITA", "RECEITAS_MULTIPLAS", "SEM_SALDO", "SALDO_PARCIAL",
+            "MATERIAL_NAO_MAPEADO", "LOTE_NAO_MAPEADO",
+        }
+        if requested_status in detailed_statuses:
+            detail_filters = dict(filters)
+            detail_filters["status"] = ""
+            detailed = _regularization_rows(
+                conn, run_id, filters.get("preferred_rt") or preferred_rt(conn), detail_filters
+            )
+            situations = {
+                (
+                    item.get("numero_nf"), item.get("serie"), key(item.get("produto")),
+                    lot(item.get("lote")),
+                ): item.get("situacao")
+                for item in detailed
+            }
+            for row in rows:
+                situation = situations.get((
+                    row.get("nf"), row.get("series"), key(row.get("sap_material")),
+                    lot(row.get("lote_fabricante") or row.get("lote_sap")),
+                ))
+                if situation:
+                    row["status"] = situation
+                    row["situacao_descricao"] = SITUATION_DESCRIPTIONS.get(situation, situation)
+                    row["acao_recomendada"] = RECOMMENDED_ACTIONS.get(situation, "Revisar a conciliação.")
+        if requested_status and requested_status != "TODOS":
+            rows = [row for row in rows if key(row.get("status")) == requested_status]
     elif page == "regularization":
         rows = _regularization_rows(conn, run_id, filters.get("preferred_rt") or preferred_rt(conn), filters)
         summary = {
@@ -1233,13 +1489,18 @@ def page_records_v2(page, filters=None):
         rows = [row for row in rows if _date_in_filters(row["data_emissao"], filters)]
         if filters.get("preferred_rt"):
             rows = [row for row in rows if key(row["emitido_por"]) == key(filters["preferred_rt"])]
+        if filters.get("allowed_properties") is not None:
+            allowed = {key(value) for value in filters.get("allowed_properties") or []}
+            rows = [row for row in rows if key(row.get("nome_propriedade")) in allowed] if allowed else []
     elif page == "stocks":
         rows = _stock_rows(conn, run_id)
         if filters.get("center"):
             rows = [row for row in rows if key(row["centro"]) == key(filters["center"])]
     elif page == "reports":
         conn.close()
-        return {"page": page, "rows": validation_rows(500, filters), "summary": None}
+        rows = validation_rows(filters=filters)
+        rows, pagination = _paginate_rows(rows, filters)
+        return {"page": page, "rows": rows, "summary": None, "pagination": pagination}
     elif page == "invoices":
         rows = [dict(row) for row in conn.execute(
             """SELECT e.nf,e.series,e.doc_date,e.center,CASE e.direction WHEN '1' THEN 'Entrada' WHEN '2' THEN 'Saída' ELSE e.direction END direcao,
@@ -1295,7 +1556,11 @@ def page_records_v2(page, filters=None):
             "SELECT source,source_file,COUNT(*) linhas FROM source_records WHERE run_id=? GROUP BY source,source_file ORDER BY source", (run_id,),
         )]
     elif page == "logs":
-        rows = [dict(row) for row in conn.execute("SELECT id,started_at,finished_at,status,summary_json FROM import_runs ORDER BY id DESC")]
+        rows = [dict(row) for row in conn.execute(
+            """SELECT id,user_email usuario,created_at data_hora,action acao,module modulo,
+               entity_type entidade,entity_id identificador,result resultado,justification justificativa
+               FROM audit_log ORDER BY id DESC"""
+        )]
     elif page == "rules":
         rows = [
             {"indicador": "Documento", "valor": "NF + série + produto + direção + data; centro quando disponível"},
@@ -1319,5 +1584,9 @@ def page_records_v2(page, filters=None):
             {"indicador": "Eficácia", "valor": f"{data['efficacy']}%"},
             {"indicador": "Divergências", "valor": data["statuses"].get("DIVERGENTE", 0)},
         ]
+    requested_status = key(filters.get("status"))
+    if requested_status and requested_status != "TODOS" and page not in {"pending", "regularization"}:
+        rows = [row for row in rows if key(row.get("status") or row.get("situacao")) == requested_status]
+    rows, pagination = _paginate_rows(rows, filters)
     conn.close()
-    return {"page": page, "rows": rows, "summary": summary}
+    return {"page": page, "rows": rows, "summary": summary, "pagination": pagination}

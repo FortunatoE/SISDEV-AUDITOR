@@ -15,7 +15,9 @@ from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 
 ROOT = Path(__file__).resolve().parents[2]
-DB_PATH = ROOT / "banco" / "sisdev_auditor.sqlite"
+DB_PATH = Path(
+    os.getenv("SISDEV_DB_PATH", str(ROOT / "banco" / "sisdev_auditor.sqlite"))
+).expanduser()
 
 REQUIRED_IMPORT_SOURCES = (
     "sap_entry_current",
@@ -218,6 +220,84 @@ def _orchestration_create_statements(id_type: str, timestamp_type: str) -> list[
     ]
 
 
+def _security_create_statements(id_type: str, timestamp_type: str) -> list[str]:
+    """Security, authorization and immutable audit structures.
+
+    These tables are intentionally independent from reconciliation data so an
+    authentication change cannot invalidate an import run.
+    """
+
+    return [
+        f"""CREATE TABLE IF NOT EXISTS app_users (
+            id {id_type} PRIMARY KEY,
+            email TEXT NOT NULL UNIQUE,
+            display_name TEXT NOT NULL,
+            password_hash TEXT NOT NULL,
+            profile TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            failed_login_count INTEGER NOT NULL DEFAULT 0,
+            locked_until {timestamp_type},
+            last_login_at {timestamp_type},
+            created_at {timestamp_type} NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at {timestamp_type} NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""",
+        f"""CREATE TABLE IF NOT EXISTS user_scopes (
+            id {id_type} PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            scope_type TEXT NOT NULL,
+            scope_value TEXT NOT NULL,
+            created_at {timestamp_type} NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id, scope_type, scope_value)
+        )""",
+        f"""CREATE TABLE IF NOT EXISTS auth_sessions (
+            id {id_type} PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE,
+            csrf_hash TEXT NOT NULL,
+            ip_address TEXT,
+            user_agent TEXT,
+            expires_at {timestamp_type} NOT NULL,
+            revoked_at {timestamp_type},
+            created_at {timestamp_type} NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            last_seen_at {timestamp_type} NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""",
+        f"""CREATE TABLE IF NOT EXISTS login_attempts (
+            id {id_type} PRIMARY KEY,
+            email TEXT,
+            ip_address TEXT,
+            success INTEGER NOT NULL DEFAULT 0,
+            created_at {timestamp_type} NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""",
+        f"""CREATE TABLE IF NOT EXISTS audit_log (
+            id {id_type} PRIMARY KEY,
+            user_id BIGINT,
+            user_email TEXT,
+            action TEXT NOT NULL,
+            module TEXT NOT NULL,
+            entity_type TEXT,
+            entity_id TEXT,
+            old_value_json TEXT,
+            new_value_json TEXT,
+            justification TEXT,
+            result TEXT NOT NULL,
+            ip_address TEXT,
+            created_at {timestamp_type} NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""",
+        f"""CREATE TABLE IF NOT EXISTS backup_registry (
+            id {id_type} PRIMARY KEY,
+            requested_by BIGINT,
+            provider TEXT NOT NULL,
+            storage_path TEXT,
+            checksum TEXT,
+            status TEXT NOT NULL,
+            details_json TEXT,
+            created_at {timestamp_type} NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            restored_at {timestamp_type},
+            restore_result TEXT
+        )""",
+    ]
+
+
 POSTGRES_IMPORT_ALTERS = [
     f"ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS {name} {definition}"
     for name, definition in IMPORT_JOB_COLUMNS.items()
@@ -230,6 +310,12 @@ INDEX_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS import_jobs_workflow_idx ON import_jobs(workflow_run_id)",
     "CREATE INDEX IF NOT EXISTS import_job_events_job_idx ON import_job_events(job_id, created_at)",
     "CREATE INDEX IF NOT EXISTS reconciliation_mappings_type_idx ON reconciliation_mappings(mapping_type, status)",
+    "CREATE INDEX IF NOT EXISTS app_users_profile_idx ON app_users(profile, active)",
+    "CREATE INDEX IF NOT EXISTS user_scopes_user_idx ON user_scopes(user_id, scope_type)",
+    "CREATE INDEX IF NOT EXISTS auth_sessions_user_idx ON auth_sessions(user_id, expires_at)",
+    "CREATE INDEX IF NOT EXISTS login_attempts_identity_idx ON login_attempts(email, ip_address, created_at)",
+    "CREATE INDEX IF NOT EXISTS audit_log_created_idx ON audit_log(created_at)",
+    "CREATE INDEX IF NOT EXISTS audit_log_user_idx ON audit_log(user_id, created_at)",
 ]
 
 
@@ -315,6 +401,8 @@ def _ensure_postgres_schema(connection: Any) -> None:
             cursor.execute(statement)
         for statement in _orchestration_create_statements("BIGSERIAL", "TIMESTAMPTZ"):
             cursor.execute(statement)
+        for statement in _security_create_statements("BIGSERIAL", "TIMESTAMPTZ"):
+            cursor.execute(statement)
         # ``import_jobs`` existed before batches/cursors were introduced.
         for statement in POSTGRES_IMPORT_ALTERS:
             cursor.execute(statement)
@@ -338,6 +426,8 @@ def _ensure_sqlite_schema(connection: sqlite3.Connection) -> None:
     for statement in _base_statements("INTEGER", "TEXT"):
         connection.execute(statement)
     for statement in _orchestration_create_statements("INTEGER", "TEXT"):
+        connection.execute(statement)
+    for statement in _security_create_statements("INTEGER", "TEXT"):
         connection.execute(statement)
 
     existing = {

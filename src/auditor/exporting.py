@@ -3,18 +3,33 @@
 from __future__ import annotations
 
 import io
+import csv
 import zipfile
 from html import escape
 from typing import Any, Iterable, Mapping, Sequence
+
+
+def formula_safe(value: Any) -> str:
+    """Prevent spreadsheet applications from executing imported formulas."""
+
+    text = "" if value is None else str(value)
+    return "'" + text if text[:1] in "=+-@" else text
+
+
+def csv_bytes(columns: Sequence[str], rows: Iterable[Mapping[str, Any]]) -> bytes:
+    stream = io.StringIO(newline="")
+    writer = csv.DictWriter(stream, fieldnames=list(columns), extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({column: formula_safe(row.get(column, "")) for column in columns})
+    return stream.getvalue().encode("utf-8-sig")
 
 
 def xlsx_bytes(columns: Sequence[str], rows: Iterable[Mapping[str, Any]]) -> bytes:
     """Build a minimal, formula-safe XLSX workbook in memory."""
 
     def cell(value: Any) -> str:
-        text = "" if value is None else str(value)
-        if text[:1] in "=+-@":
-            text = "'" + text
+        text = formula_safe(value)
         return f'<c t="inlineStr"><is><t>{escape(text)}</t></is></c>'
 
     table = [list(columns), *[[row.get(column, "") for column in columns] for row in rows]]

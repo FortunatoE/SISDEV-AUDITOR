@@ -19,8 +19,8 @@ const UPLOAD_SOURCES = [
 ];
 
 const PAGE_CONFIG = {
-  pending: { title: 'Pendências', description: 'Análise lote a lote dos documentos que exigem conferência.', empty: 'Nenhuma pendência encontrada.', columns: ['status', 'diagnosis', 'confidence', 'nf', 'series', 'doc_date', 'center', 'direcao', 'sap_material', 'lote_sap', 'lote_fabricante', 'quantidade_sap', 'unidade_sap', 'produto_sisdev', 'lote_sisdev', 'quantidade_sisdev'] },
-  regularization: { title: 'Regularizar SISDEV', description: 'Fila operacional com os dados necessários para regularização no SISDEV.', empty: 'Nenhum documento para regularizar.', columns: ['direcao', 'situacao', 'data_documento', 'cnpj', 'numero_nfe', 'serie', 'produto', 'lote', 'quantidade', 'volume_embalagem', 'quantidade_embalagem', 'numero_receituario', 'art', 'nome_rt', 'cultura', 'diagnostico', 'ure', 'dose_recomendada', 'area'] },
+  pending: { title: 'Pendências', description: 'Análise lote a lote dos documentos que exigem conferência.', empty: 'Nenhuma pendência encontrada.', columns: ['status', 'situacao_descricao', 'acao_recomendada', 'diagnosis', 'confidence', 'classificacao_automacao', 'nf', 'series', 'doc_date', 'center', 'direcao', 'sap_material', 'lote_sap', 'lote_fabricante', 'quantidade_sap', 'unidade_sap', 'produto_sisdev', 'lote_sisdev', 'quantidade_sisdev'] },
+  regularization: { title: 'Regularizar SISDEV', description: 'Fila operacional com diagnóstico, saldo e dados necessários para regularização.', empty: 'Nenhum documento para regularizar.', columns: ['situacao', 'situacao_descricao', 'status_saldo', 'acao_recomendada', 'numero_nfe', 'serie', 'data_documento', 'cnpj', 'nome_rt', 'art', 'numero_receituario', 'produto', 'volume_embalagem', 'quantidade_embalagem', 'lote', 'cultura', 'diagnostico', 'area_receita', 'ure', 'centro', 'fornecedor', 'status_conciliacao', 'classificacao_automacao'] },
   analysis: { title: 'Análises', description: 'Resumo das ocorrências por status, diagnóstico e confiança.', empty: 'Nenhuma análise disponível.', columns: ['status', 'diagnosis', 'confidence', 'ocorrencias'] },
   invoices: { title: 'Notas Fiscais', description: 'Notas fiscais SAP consolidadas por documento, centro e direção.', empty: 'Nenhuma nota fiscal encontrada.', columns: ['nf', 'series', 'doc_date', 'center', 'direcao', 'linhas', 'quantidade_sap'] },
   recipes: { title: 'Receitas', description: 'Receitas Agrotis por emissão, produto, responsável técnico e propriedade.', empty: 'Nenhuma receita encontrada.', columns: ['data_emissao', 'numero_receita', 'produto', 'volume_receita', 'unidade', 'emitido_por', 'art', 'diagnostico', 'nome_propriedade', 'cnpj'] },
@@ -34,7 +34,8 @@ const PAGE_CONFIG = {
   rules: { title: 'Regras de Conciliação', description: 'Premissas ativas para datas, quantidades, lotes e estoques.', empty: 'Nenhuma regra cadastrada.', columns: ['indicador', 'valor'] },
   reports: { title: 'Relatórios', description: 'Validação consolidada pronta para exportação em CSV ou Excel.', empty: 'Nenhum registro disponível para relatório.' },
   history: { title: 'Histórico', description: 'Fontes e quantidades de linhas utilizadas na execução atual.', empty: 'Nenhum histórico disponível.', columns: ['source', 'source_file', 'linhas'] },
-  logs: { title: 'Logs', description: 'Execuções de importação com início, término e resultado.', empty: 'Nenhuma execução registrada.', columns: ['id', 'started_at', 'finished_at', 'status', 'summary_json'] },
+  logs: { title: 'Logs', description: 'Trilha imutável das ações críticas realizadas na plataforma.', empty: 'Nenhuma ação registrada.', columns: ['id', 'data_hora', 'usuario', 'acao', 'modulo', 'entidade', 'identificador', 'resultado', 'justificativa'] },
+  users: { title: 'Usuários', description: 'Usuários, perfis, permissões e escopos autorizados.', empty: 'Nenhum usuário cadastrado.', columns: ['display_name', 'email', 'profile', 'active', 'scopes'] },
 };
 
 const LABELS = {
@@ -46,7 +47,14 @@ const LABELS = {
   movement_date: 'Data do movimento', product: 'Produto', lot: 'Lote', unit: 'Unidade',
   source: 'Fonte', source_file: 'Arquivo', started_at: 'Início', finished_at: 'Término', summary_json: 'Resumo',
   numero_nfe: 'Número da NF-e', data_documento: 'Data do documento', numero_receituario: 'Número do receituário',
-  nome_rt: 'Nome RT', dose_recomendada: 'Dose recomendada', ure: 'URE', art: 'ART', cnpj: 'CNPJ',
+  nome_rt: 'Agrônomo/Técnico', dose_recomendada: 'Dose recomendada', ure: 'URE', art: 'ART/TRT', cnpj: 'CNPJ',
+  situacao_descricao: 'Diagnóstico da situação', status_saldo: 'Status saldo', acao_recomendada: 'Ação recomendada',
+  classificacao_automacao: 'Classificação de confiança', data_hora: 'Data/hora', usuario: 'Usuário',
+  modulo: 'Módulo', entidade: 'Entidade', identificador: 'Identificador', resultado: 'Resultado',
+  display_name: 'Nome', email: 'Usuário/e-mail', profile: 'Perfil', active: 'Ativo', scopes: 'Escopos',
+  diagnostico: 'Alvo/Problema', area_receita: 'Área tratada (receita)', numero_nfe: 'Nº da NF',
+  serie: 'Série da NF', data_documento: 'Data da NF', volume_embalagem: 'Volume embalagem',
+  quantidade_embalagem: 'Qnt. embalagem', fornecedor: 'Fornecedor', status_conciliacao: 'Status da conciliação',
 };
 
 const state = {
@@ -58,6 +66,12 @@ const state = {
   reconciling: false,
   reconciliation: null,
   reconciliationPollTimer: 0,
+  auth: null,
+  page: 1,
+  perPage: 50,
+  sort: '',
+  order: 'asc',
+  appInitialized: false,
 };
 
 class ApiError extends Error {
@@ -106,6 +120,19 @@ function safeText(value) {
   return String(value);
 }
 
+function displayValue(column, value) {
+  if (value === null || value === undefined || value === '') return '—';
+  const name = String(column || '').toLowerCase();
+  const raw = String(value);
+  if ((name.includes('date') || name.includes('data') || name.endsWith('_at')) && /^\d{4}-\d{2}-\d{2}/.test(raw)) {
+    const [datePart, timePart] = raw.split(/[T ]/);
+    const [year, month, day] = datePart.split('-');
+    return timePart ? `${day}/${month}/${year} ${timePart.slice(0, 8)}` : `${day}/${month}/${year}`;
+  }
+  if (typeof value === 'boolean') return value ? 'Sim' : 'Não';
+  return safeText(value);
+}
+
 function qs() {
   return new URLSearchParams({
     from: $('from').value,
@@ -113,6 +140,12 @@ function qs() {
     center: $('center').value,
     direction: $('direction').value,
     preferred_rt: $('rt-preference')?.value || '',
+    status: $('status-filter')?.value || '',
+    nf: $('nf-filter')?.value.trim() || '',
+    page: String(state.page),
+    per_page: String(state.perPage),
+    sort: state.sort,
+    order: state.order,
   });
 }
 
@@ -133,7 +166,12 @@ async function requestJson(url, options = {}, timeoutMs = 45_000) {
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
   let response;
   try {
-    response = await fetch(url, { ...options, signal: controller.signal });
+    const headers = new Headers(options.headers || {});
+    const method = String(options.method || 'GET').toUpperCase();
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && state.auth?.csrfToken && url !== '/api/auth/login') {
+      headers.set('X-CSRF-Token', state.auth.csrfToken);
+    }
+    response = await fetch(url, { ...options, headers, signal: controller.signal });
   } catch (error) {
     if (error.name === 'AbortError') throw new ApiError('O servidor excedeu o tempo de resposta. O processamento pode continuar em segundo plano.', 0, 'TIMEOUT');
     throw new ApiError('Não foi possível conectar ao servidor. Verifique sua internet e tente novamente.', 0, 'NETWORK');
@@ -150,7 +188,10 @@ async function requestJson(url, options = {}, timeoutMs = 45_000) {
       throw new ApiError('O servidor respondeu em um formato inesperado.', response.status, 'NON_JSON');
     }
   }
-  if (!response.ok) throw new ApiError(friendlyServerMessage(response.status, data.error || data.message, raw), response.status, data.code || 'HTTP_ERROR');
+  if (!response.ok) {
+    if (response.status === 401 && url !== '/api/auth/login') showLogin('Sua sessão expirou. Entre novamente.');
+    throw new ApiError(friendlyServerMessage(response.status, data.error || data.message, raw), response.status, data.code || 'HTTP_ERROR');
+  }
   return data;
 }
 
@@ -732,7 +773,8 @@ async function loadDashboard() {
 }
 
 function orderedColumns(rows, preferred = []) {
-  const present = [...new Set(rows.flatMap((row) => Object.keys(row || {})))];
+  const internal = new Set(['reconciliation_id', 'status_original']);
+  const present = [...new Set(rows.flatMap((row) => Object.keys(row || {})))].filter((column) => !internal.has(column));
   const ordered = preferred.filter((column) => present.includes(column));
   return [...ordered, ...present.filter((column) => !ordered.includes(column))];
 }
@@ -753,21 +795,62 @@ function recordStatusClass(value) {
 function renderPageTable(page, data) {
   const config = PAGE_CONFIG[page] || { title: formatLabel(page), description: '', empty: 'Sem registros.' };
   const rows = Array.isArray(data.rows) ? data.rows : [];
-  const columns = orderedColumns(rows, config.columns || []);
+  const preferredColumns = page === 'regularization' && $('direction').value === '1'
+    ? ['situacao', 'numero_nfe', 'serie', 'data_documento', 'cnpj', 'produto', 'volume_embalagem', 'quantidade_embalagem', 'lote', 'centro', 'fornecedor', 'status_conciliacao', 'acao_recomendada']
+    : config.columns || [];
+  const columns = page === 'regularization'
+    ? preferredColumns.filter((column) => rows.some((row) => Object.hasOwn(row, column)))
+    : page === 'users'
+      ? preferredColumns.filter((column) => rows.some((row) => Object.hasOwn(row, column)))
+      : orderedColumns(rows, preferredColumns);
+  if (page === 'pending' && rows.some((row) => row.reconciliation_id)) columns.push('__actions');
   $('page-heading').textContent = config.title;
   $('page-description').textContent = config.description;
   $('page-head').replaceChildren();
   $('page-body').replaceChildren();
 
   if (columns.length) {
-    $('page-head').append(create('tr', {}, columns.map((column) => create('th', { text: formatLabel(column) }))));
+    $('page-head').append(create('tr', {}, columns.map((column) => {
+      const button = create('button', { type: 'button', className: 'sort-button', text: column === '__actions' ? 'Tratamento' : formatLabel(column) });
+      if (column === '__actions') return create('th', {}, button);
+      if (state.sort === column) button.textContent += state.order === 'asc' ? ' ↑' : ' ↓';
+      button.addEventListener('click', () => {
+        state.order = state.sort === column && state.order === 'asc' ? 'desc' : 'asc';
+        state.sort = column;
+        state.page = 1;
+        loadPage(page);
+      });
+      return create('th', {}, button);
+    })));
   }
   if (!rows.length) {
     $('page-body').append(create('tr', {}, create('td', { text: config.empty || 'Sem registros.', colSpan: Math.max(1, columns.length) })));
   } else {
     for (const row of rows) {
       const cells = columns.map((column) => {
-        const text = safeText(row[column]);
+        if (column === '__actions') {
+          const button = create('button', { type: 'button', className: 'secondary', text: 'Registrar' });
+          button.addEventListener('click', async () => {
+            const reason = window.prompt('Descreva o tratamento ou a justificativa:');
+            if (!reason?.trim()) return;
+            button.disabled = true;
+            try {
+              await requestJson(`/api/pending/${row.reconciliation_id}/actions`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'REGISTER_NOTE', reason: reason.trim() }),
+              }, 20_000);
+              $('notice').hidden = false;
+              $('notice').textContent = 'Tratamento registrado na trilha de auditoria.';
+            } catch (error) {
+              $('notice').hidden = false;
+              $('notice').textContent = error.message;
+            } finally {
+              button.disabled = false;
+            }
+          });
+          return create('td', {}, button);
+        }
+        const text = displayValue(column, row[column]);
         if (isStatusColumn(column)) return create('td', {}, create('span', { className: `tag ${recordStatusClass(text)}`.trim(), text }));
         return create('td', { text, title: text.length > 80 ? text : '' });
       });
@@ -776,6 +859,30 @@ function renderPageTable(page, data) {
   }
   renderPageSummary(page, data.summary);
   renderPageActions(page);
+  renderPagination(page, data.pagination);
+}
+
+function renderPagination(page, pagination) {
+  const container = $('page-pagination');
+  container.replaceChildren();
+  if (!pagination) {
+    container.hidden = true;
+    return;
+  }
+  container.hidden = false;
+  const label = create('span', { text: `Mostrando ${formatNumber(pagination.from)}–${formatNumber(pagination.to)} de ${formatNumber(pagination.total)} registros` });
+  const size = create('select', { attrs: { 'aria-label': 'Registros por página' } });
+  for (const value of [25, 50, 100, 250]) size.append(new Option(`${value} por página`, String(value), false, Number(pagination.per_page) === value));
+  size.addEventListener('change', () => {
+    state.perPage = Number(size.value);
+    state.page = 1;
+    loadPage(page);
+  });
+  const previous = create('button', { type: 'button', className: 'secondary', text: 'Anterior', disabled: pagination.page <= 1 });
+  const next = create('button', { type: 'button', className: 'secondary', text: 'Próxima', disabled: pagination.page >= pagination.total_pages });
+  previous.addEventListener('click', () => { state.page = Math.max(1, pagination.page - 1); loadPage(page); });
+  next.addEventListener('click', () => { state.page = pagination.page + 1; loadPage(page); });
+  container.append(label, create('div', { className: 'pagination-controls' }, [size, previous, create('span', { text: `Página ${pagination.page} de ${pagination.total_pages || 1}` }), next]));
 }
 
 function renderPageSummary(page, summary) {
@@ -793,7 +900,7 @@ function renderPageSummary(page, summary) {
 }
 
 function addExportButtons(container, page) {
-  if (!['reports', 'regularization'].includes(page)) return;
+  if (!['reports', 'regularization', 'pending'].includes(page)) return;
   const csv = create('button', { type: 'button', text: 'Exportar CSV' });
   const excel = create('button', { type: 'button', text: 'Exportar Excel' });
   csv.addEventListener('click', () => window.location.assign(`/api/export/csv/${page}?${qs()}`));
@@ -834,7 +941,19 @@ function renderPageActions(page) {
   const actions = $('page-actions');
   actions.replaceChildren();
   addExportButtons(actions, page);
-  if (page === 'regularization') addRtPreference(actions);
+  if (page === 'regularization') {
+    const entry = create('button', { type: 'button', className: 'secondary', text: 'Regularizar entrada' });
+    const exit = create('button', { type: 'button', className: 'secondary', text: 'Regularizar saída' });
+    entry.addEventListener('click', () => { $('direction').value = '1'; state.page = 1; loadPage(page); });
+    exit.addEventListener('click', () => { $('direction').value = '2'; state.page = 1; loadPage(page); });
+    actions.prepend(entry, exit);
+    addRtPreference(actions);
+  }
+  if (page === 'users') {
+    const add = create('button', { type: 'button', text: 'Novo usuário' });
+    add.addEventListener('click', () => $('user-dialog').showModal());
+    actions.append(add);
+  }
 }
 
 async function loadPage(page) {
@@ -868,11 +987,31 @@ function updateViewVisibility(page) {
   if (page !== 'dashboard') $('notice').hidden = true;
 }
 
+function configureFilters(page) {
+  const operational = ['pending', 'regularization'].includes(page);
+  $('status-filter-label').hidden = !operational;
+  $('nf-filter-label').hidden = !operational;
+  const select = $('status-filter');
+  const selected = select.value;
+  const options = page === 'pending'
+    ? ['PENDENTE', 'REGULARIZADO', 'DIVERGENTE', 'SEM_RECEITA', 'RECEITAS_MULTIPLAS', 'SEM_SALDO', 'MATERIAL_NAO_MAPEADO', 'LOTE_NAO_MAPEADO', 'ERRO_CONCILIACAO']
+    : page === 'regularization'
+      ? ['PENDENTE', 'OK', 'SEM_RECEITA', 'RECEITAS_MULTIPLAS', 'SALDO_PARCIAL', 'SEM_SALDO', 'MATERIAL_NAO_MAPEADO', 'LOTE_NAO_MAPEADO', 'DIVERGENTE', 'ERRO_CONCILIACAO']
+      : [];
+  select.replaceChildren(new Option('Todos', ''));
+  for (const value of options) select.append(new Option(formatLabel(value), value));
+  if (options.includes(selected)) select.value = selected;
+}
+
 async function navigate(page, updateHistory = true) {
   const validPage = page === 'dashboard' || page === 'uploads' || PAGE_CONFIG[page] ? page : 'dashboard';
   state.current = validPage;
+  state.page = 1;
+  state.sort = '';
+  state.order = 'asc';
   setActiveNavigation(validPage);
   updateViewVisibility(validPage);
+  configureFilters(validPage);
   const config = PAGE_CONFIG[validPage];
   $('title').textContent = validPage === 'dashboard' ? 'Dashboard' : validPage === 'uploads' ? 'Importar arquivos' : config.title;
   $('subtitle').textContent = validPage === 'dashboard'
@@ -886,6 +1025,103 @@ async function navigate(page, updateHistory = true) {
     renderUploadSummary();
     for (const source of UPLOAD_SOURCES) renderJob(source.id);
   } else await loadPage(validPage);
+}
+
+function hasAccess(value) {
+  const values = new Set(value || []);
+  return values.has('*');
+}
+
+function applyAccess() {
+  const user = state.auth?.user;
+  if (!user) return;
+  const modules = new Set(user.modules || []);
+  const permissions = new Set(user.permissions || []);
+  document.body.dataset.profile = user.profile;
+  for (const link of document.querySelectorAll('nav a[data-page]')) {
+    const page = link.dataset.page;
+    let allowed = modules.has('*') || modules.has(page);
+    if (page === 'uploads') allowed = permissions.has('*') || permissions.has('import');
+    if (page === 'users') allowed = permissions.has('*') || permissions.has('manage_users');
+    link.hidden = !allowed;
+  }
+  $('current-user').textContent = `${user.display_name} · ${formatLabel(user.profile)}`;
+}
+
+function showLogin(message = '') {
+  state.auth = null;
+  document.body.classList.remove('authenticated');
+  $('login-message').textContent = message;
+  $('login-password').value = '';
+}
+
+async function activateSession(payload) {
+  state.auth = { user: payload.user, csrfToken: payload.csrf_token };
+  document.body.classList.add('authenticated');
+  $('login-message').textContent = '';
+  applyAccess();
+  if (!state.appInitialized) {
+    state.appInitialized = true;
+    buildUploadArea();
+    installEvents();
+  }
+  await restoreRemoteJobs();
+  await navigate(window.location.hash.slice(1) || 'dashboard', false);
+}
+
+async function restoreAuth() {
+  try {
+    const payload = await requestJson('/api/auth/me', { method: 'GET' }, 20_000);
+    await activateSession(payload);
+    return true;
+  } catch (error) {
+    showLogin(error.status === 401 ? '' : error.message);
+    return false;
+  }
+}
+
+function installAuthEvents() {
+  $('login-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const button = $('login-submit');
+    button.disabled = true;
+    $('login-message').textContent = 'Autenticando...';
+    try {
+      const payload = await requestJson('/api/auth/login', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: $('login-email').value, password: $('login-password').value }),
+      }, 20_000);
+      await activateSession(payload);
+    } catch (error) {
+      $('login-message').textContent = error.message;
+    } finally {
+      button.disabled = false;
+    }
+  });
+  $('logout').addEventListener('click', async () => {
+    try { await requestJson('/api/auth/logout', { method: 'POST' }, 20_000); } catch { /* sessão já inválida */ }
+    showLogin('Sessão encerrada com segurança.');
+  });
+  $('cancel-user').addEventListener('click', () => $('user-dialog').close());
+  $('user-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const centers = $('user-centers').value.split(',').map((value) => value.trim()).filter(Boolean);
+    try {
+      await requestJson('/api/auth/users', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          display_name: $('user-name').value, email: $('user-email').value,
+          password: $('user-password').value, profile: $('user-profile').value,
+          scopes: centers.map((scope_value) => ({ scope_type: 'CENTER', scope_value })),
+        }),
+      }, 20_000);
+      $('user-dialog').close();
+      $('user-form').reset();
+      if (state.current === 'users') await loadPage('users');
+    } catch (error) {
+      $('user-form-message').textContent = error.message;
+    }
+  });
 }
 
 async function refreshCurrentView() {
@@ -912,17 +1148,23 @@ function installEvents() {
       navigate(link.dataset.page);
     });
   }
-  $('apply').addEventListener('click', () => state.current === 'dashboard' ? loadDashboard() : loadPage(state.current));
+  $('apply').addEventListener('click', () => {
+    state.page = 1;
+    return state.current === 'dashboard' ? loadDashboard() : loadPage(state.current);
+  });
+  $('clear-filters').addEventListener('click', () => {
+    for (const id of ['from', 'to', 'center', 'direction', 'status-filter', 'nf-filter']) $(id).value = '';
+    state.page = 1;
+    return state.current === 'dashboard' ? loadDashboard() : loadPage(state.current);
+  });
   $('refresh-data').addEventListener('click', refreshCurrentView);
   $('process-upload').addEventListener('click', reconcileCompleted);
   window.addEventListener('popstate', () => navigate(window.location.hash.slice(1) || 'dashboard', false));
 }
 
 async function init() {
-  buildUploadArea();
-  installEvents();
-  await restoreRemoteJobs();
-  await navigate(window.location.hash.slice(1) || 'dashboard', false);
+  installAuthEvents();
+  await restoreAuth();
 }
 
 init();

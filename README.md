@@ -54,14 +54,20 @@ Exemplo: `40 L ÷ 0,06 L/ha = 666,67 ha`.
 ## Funcionalidades
 
 - Dashboard com documentos distintos, eficácia, aderência e distribuição real dos status.
-- Filtros por período, centro, direção e preferência de RT.
-- Pendências com análise linha a linha e comparação de lotes/quantidades.
-- Fila operacional **Regularizar SISDEV** para entradas e saídas.
+- Dashboard adaptado ao perfil e limitado aos centros, unidades e propriedades autorizados.
+- Filtros por período, centro, direção, NF-e, status e preferência de RT.
+- Paginação de 25, 50, 100 ou 250 registros, com ordenação e total filtrado.
+- Pendências com diagnóstico, ação recomendada, confiança e exportação filtrada em CSV/XLSX.
+- Fila operacional **Regularizar SISDEV** para entradas e saídas, com saldo encontrado, necessidade, falta e saldo projetado.
 - Notas fiscais, receitas, movimentações e estoques em visões próprias.
 - Cadastros/dimensões derivados dos dados importados.
 - Mapeamentos persistentes de produto, propriedade/CNPJ, CNPJ-centro/URE, lote fabricante e regras.
 - Exportação CSV e XLSX de relatórios e da fila operacional.
+- Autenticação, logout, sessão revogável, cinco perfis e autorização também nas APIs.
+- Escopo por centro, unidade e propriedade; administrador possui escopo global.
+- Trilha de auditoria para login, exportação, importação, mapeamentos, usuários, configurações e tratamento de pendências.
 - Histórico de importações, eventos, progresso, alertas e causa amigável de falha.
+- Backup privado das configurações, teste de restauração e restauração administrativa confirmada.
 
 ### Regularizar SISDEV — saída
 
@@ -119,6 +125,15 @@ Em produção, `Acompanhamento SISDEV.xlsx` e o PBIX **não são fontes de dados
 | `GET /api/dashboard` | Indicadores, gráficos, filtros e alertas |
 | `GET /api/page/{pagina}` | Dados de uma guia |
 | `GET /api/export/{csv|xlsx}/{pagina}` | Exportação operacional |
+| `POST /api/auth/login` | Autentica e cria uma sessão revogável |
+| `GET /api/auth/me` | Retorna usuário, perfil, permissões e escopos |
+| `POST /api/auth/logout` | Invalida a sessão no servidor |
+| `GET/POST /api/auth/users` | Consulta/criação de usuários pelo administrador |
+| `PATCH /api/auth/users/{id}` | Perfil, situação, senha e escopos do usuário |
+| `POST /api/pending/{id}/actions` | Registra tratamento humano da pendência |
+| `POST /api/admin/backups` | Cria snapshot privado de configurações |
+| `POST /api/admin/backups/{id}/restore-test` | Valida integridade e legibilidade do snapshot |
+| `POST /api/admin/backups/{id}/restore` | Restaura snapshot com confirmação e justificativa |
 | `GET/POST /api/settings/rt-preference` | Preferência de RT |
 | `GET/POST /api/mappings` | Premissas e mapeamentos |
 | `GET /api/health` | Saúde básica da API |
@@ -130,9 +145,15 @@ Variáveis obrigatórias na Vercel:
 ```text
 DATABASE_URL=<conexão pooled do Neon>
 BLOB_READ_WRITE_TOKEN=<token do Vercel Blob>
+SISDEV_SECRET_KEY=<segredo aleatório longo para assinar a sessão>
+SISDEV_BOOTSTRAP_ADMIN_EMAIL=<usuário ou e-mail do primeiro administrador>
+SISDEV_BOOTSTRAP_ADMIN_PASSWORD=<senha inicial forte>
+SISDEV_BOOTSTRAP_ADMIN_NAME=<nome opcional>
 ```
 
-Mantenha `DATABASE_URL_UNPOOLED` somente para migrações administrativas quando disponibilizada pela integração Neon.
+O administrador inicial só é criado quando ainda não existe nenhum usuário. Depois do primeiro acesso, troque a senha inicial e remova `SISDEV_BOOTSTRAP_ADMIN_PASSWORD` do ambiente. Nunca versionar essas variáveis.
+
+Mantenha `DATABASE_URL_UNPOOLED` somente para migrações administrativas quando disponibilizada pela integração Neon. Para desenvolvimento, `SISDEV_DB_PATH` permite usar um SQLite isolado.
 
 ### Banco
 
@@ -140,9 +161,10 @@ Antes da primeira publicação da fila, execute no Neon:
 
 ```text
 sql/import_jobs.sql
+sql/security_access.sql
 ```
 
-O script é idempotente e pode ser reaplicado em atualizações de schema.
+Os scripts são idempotentes e podem ser reaplicados em atualizações de schema. Use conexão direta para a migração e a conexão pooled para a aplicação.
 
 ## Desenvolvimento e testes
 
@@ -169,6 +191,17 @@ Promova para produção somente depois de validar o preview:
 vercel deploy --prod
 ```
 
-## Segurança dos dados
+## Segurança e governança
 
-Planilhas, PDFs, banco local, arquivos temporários, variáveis de ambiente e artefatos operacionais estão excluídos pelo `.gitignore`. Como as fontes podem conter CNPJ, propriedade e dados operacionais, uma instalação pública deve adicionar autenticação e autorização antes de uso por múltiplos usuários.
+- Todas as páginas e APIs operacionais exigem sessão válida; mutações também exigem token CSRF.
+- A autorização combina usuário, perfil, permissão e escopo e é validada no backend.
+- Senhas usam hash `scrypt`; tentativas falhas são registradas e limitadas temporariamente.
+- Cookies são `HttpOnly`, `Secure` em produção e `SameSite=Lax`; logout revoga a sessão no banco.
+- Arquivos originais são gravados como privados no Blob e suas URLs não são devolvidas nas APIs.
+- Uploads validam extensão, assinatura, ZIP XLSX, presença de macros, tamanho, estrutura, colunas e limites de linhas/colunas.
+- CSV e XLSX neutralizam células iniciadas como fórmulas.
+- Segredos e credenciais permanecem exclusivamente no backend e em variáveis de ambiente.
+- Logs de auditoria não possuem rota comum de exclusão.
+- O backup principal do banco é o point-in-time restore do Neon; o sistema adiciona snapshots privados das configurações e um teste explícito de restauração.
+
+Detalhes operacionais estão em `docs/SECURITY_AND_BACKUP.md`.

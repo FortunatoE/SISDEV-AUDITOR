@@ -8,6 +8,16 @@
   <link rel="stylesheet" href="export.css">
 </head>
 <body>
+  <section id="login-view" class="login-view" aria-labelledby="login-title">
+    <form id="login-form" class="login-card">
+      <h1 id="login-title">SISDEV AUDITOR</h1>
+      <p>Acesse a plataforma de auditoria e regularização.</p>
+      <label>Usuário ou e-mail <input id="login-email" type="text" autocomplete="username" required></label>
+      <label>Senha <input id="login-password" type="password" autocomplete="current-password" minlength="10" required></label>
+      <button id="login-submit" type="submit">Entrar</button>
+      <p id="login-message" class="login-message" role="alert" aria-live="assertive"></p>
+    </form>
+  </section>
   <aside>
     <div class="brand">
       <section>
@@ -41,6 +51,7 @@
       <a href="#reports" data-page="reports">▤ Relatórios</a>
       <a href="#history" data-page="history">▱ Histórico</a>
       <a href="#logs" data-page="logs">▤ Logs</a>
+      <a href="#users" data-page="users">♟ Usuários</a>
     </nav>
 
     <footer>Fase C · Copiloto/Auditor<br><i></i> Automação monitorada</footer>
@@ -52,7 +63,11 @@
         <h1 id="title">Dashboard</h1>
         <p id="subtitle">Visão geral da auditoria e conciliação de movimentações de químicos</p>
       </div>
-      <button id="refresh-data" type="button">↻ Atualizar dados</button>
+      <div class="user-actions">
+        <span id="current-user"></span>
+        <button id="refresh-data" type="button">↻ Atualizar dados</button>
+        <button id="logout" type="button" class="secondary">Sair</button>
+      </div>
     </header>
 
     <section id="filters" class="filters" aria-label="Filtros">
@@ -64,7 +79,12 @@
       <label>Tipo de operação
         <select id="direction"><option value="">Todas</option></select>
       </label>
-      <button id="apply" type="button">Aplicar filtros</button>
+      <label id="status-filter-label">Status
+        <select id="status-filter"><option value="">Todos</option></select>
+      </label>
+      <label id="nf-filter-label">Número da NF-e <input id="nf-filter" type="search" inputmode="numeric" placeholder="Ex.: 12345"></label>
+      <button id="apply" type="button">Pesquisar</button>
+      <button id="clear-filters" type="button" class="secondary">Limpar filtros</button>
     </section>
 
     <div id="notice" class="notice" role="status" aria-live="polite">Carregando dados...</div>
@@ -81,11 +101,11 @@
 
     <div id="dashboard-view">
       <section class="metrics">
-        <article><span>▤</span><small>DOCUMENTOS ANALISADOS</small><strong id="total">—</strong><em>NF distintas do SAP</em></article>
-        <article><span class="green">✓</span><small>CORRETOS</small><strong id="correct">—</strong><em id="correctPct">—</em></article>
-        <article><span class="yellow">◷</span><small>PENDENTES</small><strong id="pending">—</strong><em>aguardam regra/mapeamento</em></article>
-        <article><span class="red">!</span><small>DIVERGENTES</small><strong id="divergent">—</strong><em>lote ou quantidade</em></article>
-        <article><span class="purple">×</span><small>NÃO LANÇADOS</small><strong id="unposted">—</strong><em>NF sem SISDEV</em></article>
+        <article class="metric-documents"><span>▤</span><small>DOCUMENTOS ANALISADOS</small><strong id="total">—</strong><em>NF distintas do SAP</em></article>
+        <article class="metric-correct"><span class="green">✓</span><small>CORRETOS</small><strong id="correct">—</strong><em id="correctPct">—</em></article>
+        <article class="metric-pending"><span class="yellow">◷</span><small>PENDENTES</small><strong id="pending">—</strong><em>aguardam regra/mapeamento</em></article>
+        <article class="metric-divergent"><span class="red">!</span><small>DIVERGENTES</small><strong id="divergent">—</strong><em>lote ou quantidade</em></article>
+        <article class="metric-unposted"><span class="purple">×</span><small>NÃO LANÇADOS</small><strong id="unposted">—</strong><em>NF sem SISDEV</em></article>
         <article class="eff">
           <small>ÍNDICE DE EFICÁCIA</small>
           <div class="gauge" id="efficacy-gauge"><strong id="efficacy">—</strong><i>Meta: 100%</i></div>
@@ -97,7 +117,7 @@
       </section>
 
       <section class="dashboard-grid">
-        <article class="panel">
+        <article class="panel distribution-panel">
           <h2>Distribuição dos status</h2>
           <div id="donut" class="donut empty"><b id="donutValue">0</b></div>
           <ul id="legend"></ul>
@@ -146,8 +166,26 @@
       <div class="table-scroll">
         <table><thead id="page-head"></thead><tbody id="page-body"></tbody></table>
       </div>
+      <div id="page-pagination" class="pagination" hidden></div>
     </section>
   </main>
+
+  <dialog id="user-dialog">
+    <form id="user-form" method="dialog" class="user-form">
+      <h2>Novo usuário</h2>
+      <label>Nome <input id="user-name" required></label>
+      <label>Usuário ou e-mail <input id="user-email" type="text" autocomplete="username" required></label>
+      <label>Senha temporária <input id="user-password" type="password" minlength="10" required></label>
+      <label>Perfil
+        <select id="user-profile">
+          <option>GESTOR</option><option>AUDITOR</option><option>OPERADOR</option><option>CONSULTA</option><option>ADMINISTRADOR</option>
+        </select>
+      </label>
+      <label>Centros autorizados <input id="user-centers" placeholder="1001, 1002"></label>
+      <p id="user-form-message" class="login-message" role="alert"></p>
+      <div class="dialog-actions"><button type="button" id="cancel-user" class="secondary">Cancelar</button><button type="submit">Criar usuário</button></div>
+    </form>
+  </dialog>
 
   <script src="app.js" defer></script>
 </body>

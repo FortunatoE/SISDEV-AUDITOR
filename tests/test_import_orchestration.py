@@ -21,7 +21,7 @@ from workflow import imports as workflow_imports
 def client(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.setattr(database, "DB_PATH", tmp_path / "test.sqlite")
-    api.app.config.update(TESTING=True)
+    api.app.config.update(TESTING=True, AUTH_DISABLED=True)
     return api.app.test_client()
 
 
