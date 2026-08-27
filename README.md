@@ -4,7 +4,7 @@ Aplicação web para auditoria, conciliação e preparação operacional de lan�
 
 > O SISDEV AUDITOR não realiza lançamentos automáticos no SISDEV.
 
-## Versão aprovada — agosto de 2026
+## Versão  — 27 agosto de 2026
 
 Esta versão consolida a evolução da aplicação para uma plataforma protegida de análise, auditoria e orientação operacional. Está publicada em [sisdev-auditor.vercel.app](https://sisdev-auditor.vercel.app/).
 
