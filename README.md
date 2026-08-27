@@ -4,6 +4,31 @@ Aplicação web para auditoria, conciliação e preparação operacional de lan�
 
 > O SISDEV AUDITOR não realiza lançamentos automáticos no SISDEV.
 
+## Versão aprovada — agosto de 2026
+
+Esta versão consolida a evolução da aplicação para uma plataforma protegida de análise, auditoria e orientação operacional. Está publicada em [sisdev-auditor.vercel.app](https://sisdev-auditor.vercel.app/).
+
+Principais melhorias entregues:
+
+- login seguro com sessão revogável, logout, proteção CSRF e limitação de tentativas;
+- perfis `ADMINISTRADOR`, `GESTOR`, `AUDITOR`, `OPERADOR` e `CONSULTA`;
+- autorização validada no backend por perfil, permissão e escopo;
+- criação e administração de usuários restritas ao painel do administrador;
+- escopos de acesso por centro, unidade e propriedade;
+- paginação de tabelas com 25, 50, 100 e 250 registros por página;
+- filtros combinados por período, centro, operação, status e NF-e;
+- exportação filtrada em CSV e XLSX com proteção contra CSV Injection;
+- Pendências com situação estruturada, diagnóstico, ação recomendada e confiança;
+- Regularizar SISDEV separado entre entrada e saída, com dados operacionais completos;
+- cálculo inteligente do saldo: `OK`, `SALDO_PARCIAL` e `SEM_SALDO`;
+- trilha de auditoria para autenticação, importação, exportação, cadastros, mapeamentos e tratamento de pendências;
+- uploads validados e arquivos originais privados no Vercel Blob;
+- backup privado de configurações com verificação e restauração administrativa;
+- processamento assíncrono por fonte com Vercel Workflow e progresso persistido no Neon;
+- classificação preparatória `CANDIDATO_AUTOMACAO` ou `REVISAO_HUMANA`, sem executar ações críticas automaticamente.
+
+Validação desta versão: **28 testes automatizados aprovados**, importação das oito fontes operacionais validada e deployment de produção sem erros de runtime após a publicação.
+
 ## Fluxo operacional
 
 1. O usuário envia cada fonte separadamente na guia **Importar arquivos**.
