@@ -76,13 +76,21 @@
       <label>Centro
         <select id="center"><option value="">Todos os centros</option></select>
       </label>
-      <label>Tipo de operação
-        <select id="direction"><option value="">Todas</option></select>
+      <label id="direction-filter-label">Tipo de operação
+        <select id="direction">
+          <option value="">Todas</option>
+          <option value="1">Entrada</option>
+          <option value="2">Saída</option>
+        </select>
       </label>
       <label id="status-filter-label">Status
         <select id="status-filter"><option value="">Todos</option></select>
       </label>
       <label id="nf-filter-label">Número da NF-e <input id="nf-filter" type="search" inputmode="numeric" placeholder="Ex.: 12345"></label>
+      <label id="lot-filter-label" hidden>Produto &amp; lote
+        <input id="lot-filter" type="search" list="lot-filter-options" autocomplete="off" placeholder="Digite o produto ou lote">
+        <datalist id="lot-filter-options"></datalist>
+      </label>
       <button id="apply" type="button">Pesquisar</button>
       <button id="clear-filters" type="button" class="secondary">Limpar filtros</button>
     </section>
@@ -172,19 +180,33 @@
 
   <dialog id="user-dialog">
     <form id="user-form" method="dialog" class="user-form">
-      <h2>Novo usuário</h2>
+      <h2 id="user-dialog-title">Novo usuário</h2>
       <label>Nome <input id="user-name" required></label>
       <label>Usuário ou e-mail <input id="user-email" type="text" autocomplete="username" required></label>
-      <label>Senha temporária <input id="user-password" type="password" minlength="10" required></label>
+      <label><span id="user-password-label">Senha temporária</span> <input id="user-password" type="password" minlength="10" required></label>
       <label>Perfil
         <select id="user-profile">
           <option>GESTOR</option><option>AUDITOR</option><option>OPERADOR</option><option>CONSULTA</option><option>ADMINISTRADOR</option>
         </select>
       </label>
       <label>Centros autorizados <input id="user-centers" placeholder="1001, 1002"></label>
+      <label class="checkbox-label"><input id="user-active" type="checkbox" checked> Usuário ativo</label>
       <p id="user-form-message" class="login-message" role="alert"></p>
-      <div class="dialog-actions"><button type="button" id="cancel-user" class="secondary">Cancelar</button><button type="submit">Criar usuário</button></div>
+      <div class="dialog-actions"><button type="button" id="cancel-user" class="secondary">Cancelar</button><button id="user-submit" type="submit">Criar usuário</button></div>
     </form>
+  </dialog>
+
+  <dialog id="regularization-detail-dialog" class="detail-dialog">
+    <div class="detail-dialog-shell">
+      <header class="detail-dialog-header">
+        <div>
+          <small>Árvore de rastreabilidade</small>
+          <h2 id="regularization-detail-title">Detalhe da nota fiscal</h2>
+        </div>
+        <button id="close-regularization-detail" type="button" class="secondary" aria-label="Fechar detalhe">Fechar</button>
+      </header>
+      <div id="regularization-detail-content" class="detail-dialog-content"></div>
+    </div>
   </dialog>
 
   <script src="app.js" defer></script>

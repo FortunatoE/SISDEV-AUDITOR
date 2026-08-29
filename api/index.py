@@ -12,6 +12,7 @@ import hmac
 import json
 import logging
 import os
+import secrets
 import sys
 import zipfile
 from datetime import date, datetime, timezone
@@ -31,6 +32,7 @@ from auditor.database import REQUIRED_IMPORT_SOURCES, connect
 from auditor.engine import (
     dashboard_v2,
     page_records_v2,
+    regularization_document_detail,
     regularization_export_rows,
     rt_preference_options,
     set_preferred_rt,
@@ -45,6 +47,7 @@ from auditor.security import (
     ensure_bootstrap_admin,
     has_permission,
     hash_password,
+    normalize_email,
     public_user,
     record_audit,
     revoke_session,
@@ -73,12 +76,56 @@ STATUS_LABELS = {
     "FAILED": "Falhou",
     "SUPERSEDED": "Substituído",
 }
+EXPORTABLE_PAGES = {
+    "pending", "regularization", "analysis", "invoices", "recipes", "movements",
+    "stocks", "reports", "history", "materials", "lots", "units",
+    "movement_types", "units_measure", "logs", "rules",
+}
+
+OLE_WORKBOOK_SIGNATURE = bytes.fromhex("D0CF11E0")
+OOXML_REQUIRED_MEMBERS = {"[content_types].xml", "xl/workbook.xml"}
+
+
+def _spreadsheet_upload_error(stream: Any, extension: str) -> str | None:
+    """Validate Excel content by signature, not only by the file suffix.
+
+    Agrotis exports OOXML workbooks with the legacy ``.xls`` filename. Those
+    files are valid Excel workbooks and must follow the same ZIP/macro checks
+    as a regular ``.xlsx`` upload.
+    """
+
+    header = stream.read(8)
+    stream.seek(0)
+    is_ooxml = header.startswith(b"PK")
+    is_ole = header.startswith(OLE_WORKBOOK_SIGNATURE)
+    if extension == ".xlsx" and not is_ooxml:
+        return "O conteúdo enviado não é uma planilha XLSX válida."
+    if extension == ".xls" and not (is_ole or is_ooxml):
+        return "O conteúdo enviado não é uma planilha XLS válida."
+    if not is_ooxml:
+        return None
+
+    try:
+        with zipfile.ZipFile(stream) as archive:
+            members = {name.replace("\\", "/").lower() for name in archive.namelist()}
+            if not OOXML_REQUIRED_MEMBERS.issubset(members):
+                return "O conteúdo enviado não é uma planilha Excel válida."
+            if any(name.endswith("vbaproject.bin") for name in members):
+                return "Planilhas com macros não são permitidas."
+    except zipfile.BadZipFile:
+        return "A planilha Excel está corrompida."
+    finally:
+        stream.seek(0)
+    return None
 
 app = Flask(__name__)
 _configured_secret = os.getenv("SISDEV_SECRET_KEY") or os.getenv("SECRET_KEY")
-if os.getenv("VERCEL") and not _configured_secret:
+_runtime_environment = str(os.getenv("SISDEV_ENV") or "").strip().lower()
+if (os.getenv("VERCEL") or _runtime_environment in {"production", "staging"}) and not _configured_secret:
     raise RuntimeError("SISDEV_SECRET_KEY não configurada no ambiente de produção.")
-app.secret_key = _configured_secret or "sisdev-local-development-only"
+# Development/test sessions may use an ephemeral key, but never a public,
+# predictable fallback that could be used to forge Flask cookies.
+app.secret_key = _configured_secret or secrets.token_hex(32)
 app.config.update(
     SESSION_COOKIE_NAME="sisdev_session",
     SESSION_COOKIE_HTTPONLY=True,
@@ -102,10 +149,12 @@ ENDPOINT_PERMISSIONS = {
     "list_users": "manage_users",
     "create_app_user": "manage_users",
     "update_app_user": "manage_users",
+    "delete_app_user": "manage_users",
     "create_backup": "manage_backup",
     "test_restore_backup": "manage_backup",
     "restore_backup": "manage_backup",
     "record_pending_action": "treat_pending",
+    "record_regularization_decision": "treat_pending",
 }
 
 
@@ -208,7 +257,35 @@ def _scoped_filters(values: dict[str, Any]) -> dict[str, Any]:
         raise PermissionError("Centro fora do escopo autorizado.")
     result["allowed_centers"] = centers
     result["allowed_properties"] = properties
+    result["actor_user_id"] = int(user["id"])
     return result
+
+
+def _is_admin(user: dict[str, Any] | None = None) -> bool:
+    actor = user or _current_user()
+    return bool(actor and actor.get("profile") == "ADMINISTRADOR")
+
+
+def _owner_condition(*, alias: str = "") -> tuple[str, list[Any]]:
+    """Return a fail-closed owner predicate for user-created orchestration rows."""
+
+    if _is_admin():
+        return "", []
+    actor = _current_user()
+    prefix = f"{alias}." if alias else ""
+    return f" AND {prefix}created_by=?", [int(actor["id"])]
+
+
+def _scope_snapshot(user: dict[str, Any]) -> tuple[int, str | None, str | None]:
+    if user.get("profile") == "ADMINISTRADOR":
+        return int(user["id"]), None, None
+    centers = sorted(set(scope_values(user, "CENTER") + scope_values(user, "UNIT")))
+    properties = sorted(set(scope_values(user, "PROPERTY")))
+    return (
+        int(user["id"]),
+        json.dumps(centers, ensure_ascii=False),
+        json.dumps(properties, ensure_ascii=False),
+    )
 
 
 @app.before_request
@@ -273,6 +350,9 @@ def _job_payload(row: Any, *, include_error: bool = True) -> dict[str, Any]:
     # Storage identifiers and private download URLs never belong in the browser.
     result.pop("blob_path", None)
     result.pop("blob_url", None)
+    result.pop("created_by", None)
+    result.pop("scope_centers_json", None)
+    result.pop("scope_properties_json", None)
     processed = int(result.get("processed_rows") or 0)
     total = int(result.get("total_rows") or 0)
     status = str(result.get("status") or "QUEUED")
@@ -290,6 +370,9 @@ def _job_payload(row: Any, *, include_error: bool = True) -> dict[str, Any]:
 
 def _batch_payload(row: Any) -> dict[str, Any]:
     result = _row_dict(row)
+    result.pop("created_by", None)
+    result.pop("scope_centers_json", None)
+    result.pop("scope_properties_json", None)
     result["required_sources"] = [
         item for item in str(result.get("required_sources") or "").split(",") if item
     ]
@@ -299,15 +382,22 @@ def _batch_payload(row: Any) -> dict[str, Any]:
 def _load_job(job_id: int) -> Any:
     connection = connect()
     try:
-        return connection.execute("SELECT * FROM import_jobs WHERE id=?", (job_id,)).fetchone()
+        owner_sql, owner_params = _owner_condition()
+        return connection.execute(
+            "SELECT * FROM import_jobs WHERE id=?" + owner_sql,
+            [job_id, *owner_params],
+        ).fetchone()
     finally:
         connection.close()
 
 
-def _get_or_create_batch(connection: Any) -> Any:
+def _get_or_create_batch(connection: Any, user: dict[str, Any]) -> Any:
+    created_by, scope_centers_json, scope_properties_json = _scope_snapshot(user)
     batch = connection.execute(
         """SELECT * FROM import_batches
-           WHERE status IN ('OPEN','IMPORTING') ORDER BY id DESC LIMIT 1"""
+           WHERE status IN ('OPEN','IMPORTING') AND created_by=?
+           ORDER BY id DESC LIMIT 1""",
+        (created_by,),
     ).fetchone()
     if batch is not None:
         return batch
@@ -321,9 +411,10 @@ def _get_or_create_batch(connection: Any) -> Any:
     ).fetchone()[0]
     required = ",".join(REQUIRED_IMPORT_SOURCES)
     return connection.execute(
-        """INSERT INTO import_batches(run_id,status,required_sources)
-           VALUES (?,'OPEN',?) RETURNING *""",
-        (run_id, required),
+        """INSERT INTO import_batches(
+               run_id,created_by,scope_centers_json,scope_properties_json,status,required_sources
+           ) VALUES (?,?,?,?, 'OPEN',?) RETURNING *""",
+        (run_id, created_by, scope_centers_json, scope_properties_json, required),
     ).fetchone()
 
 
@@ -384,7 +475,11 @@ def _start_reconciliation_workflow(batch_id: int) -> str:
 def _queue_job(job_id: int, *, manual_retry: bool = False, restart: bool = False):
     connection = connect()
     try:
-        job = connection.execute("SELECT * FROM import_jobs WHERE id=?", (job_id,)).fetchone()
+        owner_sql, owner_params = _owner_condition()
+        job = connection.execute(
+            "SELECT * FROM import_jobs WHERE id=?" + owner_sql,
+            [job_id, *owner_params],
+        ).fetchone()
         if job is None:
             return jsonify({"error": "Importação não encontrada."}), 404
         if job["status"] == "SUPERSEDED":
@@ -548,7 +643,9 @@ def auth_logout():
 def list_users():
     connection = connect()
     try:
-        rows = connection.execute("SELECT * FROM app_users ORDER BY display_name,email").fetchall()
+        rows = connection.execute(
+            "SELECT * FROM app_users WHERE deleted_at IS NULL ORDER BY display_name,email"
+        ).fetchall()
         users = [public_user(row, connection=connection) for row in rows]
     finally:
         connection.close()
@@ -576,7 +673,9 @@ def update_app_user(user_id: int):
     data = request.get_json(silent=True) or {}
     connection = connect()
     try:
-        row = connection.execute("SELECT * FROM app_users WHERE id=?", (user_id,)).fetchone()
+        row = connection.execute(
+            "SELECT * FROM app_users WHERE id=? AND deleted_at IS NULL", (user_id,)
+        ).fetchone()
         if row is None:
             return jsonify({"error": "Usuário não encontrado."}), 404
         old_value = public_user(row, connection=connection)
@@ -586,12 +685,31 @@ def update_app_user(user_id: int):
         active = int(bool(data.get("active", bool(row["active"]))))
         if user_id == _current_user().get("id") and not active:
             return jsonify({"error": "Não é possível desativar o próprio usuário."}), 409
+        if row["profile"] == "ADMINISTRADOR" and row["active"] and (profile != "ADMINISTRADOR" or not active):
+            remaining_admins = connection.execute(
+                """SELECT COUNT(*) n FROM app_users
+                   WHERE id<>? AND profile='ADMINISTRADOR' AND active=1 AND deleted_at IS NULL""",
+                (user_id,),
+            ).fetchone()["n"]
+            if not remaining_admins:
+                return jsonify({"error": "É necessário manter ao menos um administrador ativo."}), 409
+        email = normalize_email(data.get("email", row["email"]))
+        if not email or len(email) > 254 or any(character.isspace() for character in email):
+            return jsonify({"error": "Informe um usuário ou e-mail válido."}), 400
+        duplicate = connection.execute(
+            "SELECT id FROM app_users WHERE email=? AND id<>?", (email, user_id)
+        ).fetchone()
+        if duplicate:
+            return jsonify({"error": "Já existe um usuário com esse identificador."}), 409
+        display_name = str(data.get("display_name", row["display_name"])).strip()
+        if not display_name:
+            return jsonify({"error": "Informe o nome do usuário."}), 400
         password = str(data.get("password") or "")
         password_hash = hash_password(password) if password else row["password_hash"]
         connection.execute(
-            """UPDATE app_users SET display_name=?,profile=?,active=?,password_hash=?,updated_at=CURRENT_TIMESTAMP
+            """UPDATE app_users SET email=?,display_name=?,profile=?,active=?,password_hash=?,updated_at=CURRENT_TIMESTAMP
                WHERE id=?""",
-            (str(data.get("display_name", row["display_name"])).strip(), profile, active, password_hash, user_id),
+            (email, display_name, profile, active, password_hash, user_id),
         )
         if password or not active:
             connection.execute(
@@ -624,6 +742,59 @@ def update_app_user(user_id: int):
         justification=str(data.get("justification") or ""),
     )
     return jsonify({"ok": True, "user": new_value})
+
+
+@app.delete("/api/auth/users/<int:user_id>")
+def delete_app_user(user_id: int):
+    if user_id == _current_user().get("id"):
+        return jsonify({"error": "Não é possível excluir o próprio usuário."}), 409
+    data = request.get_json(silent=True) or {}
+    connection = connect()
+    try:
+        row = connection.execute(
+            "SELECT * FROM app_users WHERE id=? AND deleted_at IS NULL", (user_id,)
+        ).fetchone()
+        if row is None:
+            return jsonify({"error": "Usuário não encontrado."}), 404
+        old_value = public_user(row, connection=connection)
+        if row["profile"] == "ADMINISTRADOR" and row["active"]:
+            remaining_admins = connection.execute(
+                """SELECT COUNT(*) n FROM app_users
+                   WHERE id<>? AND profile='ADMINISTRADOR' AND active=1 AND deleted_at IS NULL""",
+                (user_id,),
+            ).fetchone()["n"]
+            if not remaining_admins:
+                return jsonify({"error": "É necessário manter ao menos um administrador ativo."}), 409
+        deleted_identity = (
+            f"deleted-{user_id}-{hashlib.sha256(str(row['email']).encode('utf-8')).hexdigest()[:12]}"
+        )
+        connection.execute(
+            """UPDATE app_users SET email=?,display_name=?,active=0,password_hash=?,
+               deleted_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+            (
+                deleted_identity,
+                f"Usuário excluído #{user_id}",
+                hash_password(os.urandom(32).hex()),
+                user_id,
+            ),
+        )
+        connection.execute("DELETE FROM user_scopes WHERE user_id=?", (user_id,))
+        connection.execute(
+            "UPDATE auth_sessions SET revoked_at=CURRENT_TIMESTAMP WHERE user_id=? AND revoked_at IS NULL",
+            (user_id,),
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+    _audit(
+        "DELETE", "USERS", entity_type="USER", entity_id=user_id,
+        old_value=old_value, new_value={"deleted": True},
+        justification=str(data.get("justification") or "Exclusão solicitada pelo administrador."),
+    )
+    return jsonify({"ok": True, "deleted_user_id": user_id})
 
 
 @app.post("/api/admin/backups")
@@ -768,13 +939,16 @@ def page(page: str):
         sort_direction = "DESC" if str(request.args.get("order") or "").lower() == "desc" else "ASC"
         connection = connect()
         try:
-            total = int(connection.execute("SELECT COUNT(*) n FROM app_users").fetchone()["n"] or 0)
+            total = int(connection.execute(
+                "SELECT COUNT(*) n FROM app_users WHERE deleted_at IS NULL"
+            ).fetchone()["n"] or 0)
             total_pages = (total + per_page - 1) // per_page if total else 0
             if total_pages and page_number > total_pages:
                 page_number = total_pages
             offset = (page_number - 1) * per_page
             users = [public_user(row, connection=connection) for row in connection.execute(
-                f"SELECT * FROM app_users ORDER BY {sort_column} {sort_direction},id LIMIT ? OFFSET ?",
+                f"""SELECT * FROM app_users WHERE deleted_at IS NULL
+                    ORDER BY {sort_column} {sort_direction},id LIMIT ? OFFSET ?""",
                 (per_page, offset),
             )]
         finally:
@@ -797,6 +971,119 @@ def page(page: str):
 @app.get("/api/settings/rt-preference")
 def get_rt_preference():
     return jsonify(rt_preference_options())
+
+
+@app.get("/api/regularization/<document_id>")
+def regularization_detail(document_id: str):
+    try:
+        filters = _scoped_filters(request.args.to_dict())
+    except PermissionError as error:
+        return jsonify({"error": str(error), "code": "SCOPE_FORBIDDEN"}), 403
+    detail = regularization_document_detail(document_id, filters)
+    if detail is None:
+        return jsonify({"error": "Nota fiscal não encontrada na fila atual."}), 404
+    document = detail.get("document") or {}
+    _audit(
+        "VIEW_DETAIL", "REGULARIZATION", entity_type="DOCUMENT", entity_id=document_id,
+        new_value={"nf": document.get("numero_nfe"), "series": document.get("serie")},
+        critical=False,
+    )
+    return jsonify(detail)
+
+
+@app.post("/api/regularization/<document_id>/decisions")
+def record_regularization_decision(document_id: str):
+    data = request.get_json(silent=True) or {}
+    decision_type = str(data.get("decision_type") or "").strip().upper()
+    allowed = {
+        "SELECT_RECIPE", "CONFIRM_RECIPE", "REJECT_RECIPE",
+        "CONFIRM_MOVEMENT", "REJECT_MOVEMENT", "TREAT_PENDING",
+    }
+    if decision_type not in allowed:
+        return jsonify({"error": "Tipo de decisão não suportado."}), 400
+    selected_ids = data.get("selected_ids") or []
+    if not isinstance(selected_ids, list):
+        return jsonify({"error": "A seleção deve ser uma lista."}), 400
+    selected_ids = list(dict.fromkeys(
+        str(value).strip() for value in selected_ids if str(value).strip()
+    ))[:200]
+    movement_id = str(data.get("movement_id") or "").strip()
+    if movement_id and movement_id not in selected_ids:
+        selected_ids.append(movement_id)
+    if decision_type == "CONFIRM_RECIPE" and not selected_ids:
+        return jsonify({"error": "Selecione ao menos uma receita antes de confirmar."}), 400
+    if decision_type in {"CONFIRM_MOVEMENT", "REJECT_MOVEMENT"} and not selected_ids:
+        return jsonify({"error": "Selecione ao menos uma movimentação da saída original."}), 400
+    try:
+        detail_filters = _scoped_filters({})
+    except PermissionError as error:
+        return jsonify({"error": str(error), "code": "SCOPE_FORBIDDEN"}), 403
+    detail = regularization_document_detail(document_id, detail_filters)
+    if detail is None:
+        return jsonify({"error": "Nota fiscal não encontrada na fila atual."}), 404
+    recipe_ids = {str(item.get("recipe_id")) for item in detail.get("recipes", []) if item.get("recipe_id")}
+    if decision_type in {"SELECT_RECIPE", "CONFIRM_RECIPE", "REJECT_RECIPE"}:
+        unknown_ids = [value for value in selected_ids if value not in recipe_ids]
+        if unknown_ids:
+            return jsonify({"error": "Uma ou mais receitas não pertencem a esta nota fiscal."}), 400
+    if decision_type == "CONFIRM_RECIPE":
+        recipes = {str(item.get("recipe_id")): item for item in detail.get("recipes", [])}
+        selected_total = sum(float(recipes[value].get("quantidade_receita") or 0) for value in selected_ids)
+        required_total = float((detail.get("recipe_selection") or {}).get("required") or 0)
+        tolerance = max(0.001, abs(required_total) * 0.000001)
+        if abs(selected_total - required_total) > tolerance:
+            return jsonify({
+                "error": "O volume das receitas selecionadas não corresponde ao volume necessário.",
+                "required": required_total,
+                "selected": selected_total,
+                "difference": round(required_total - selected_total, 6),
+            }), 400
+    if decision_type in {"CONFIRM_MOVEMENT", "REJECT_MOVEMENT"}:
+        suggested_movements = {
+            str(item.get("id")) for item in (detail.get("return_chain") or {}).get("movements", [])
+            if item.get("id")
+        }
+        unknown_ids = [value for value in selected_ids if value not in suggested_movements]
+        if not suggested_movements or unknown_ids:
+            return jsonify({"error": "Uma ou mais movimentações não pertencem ao retorno desta nota fiscal."}), 400
+    justification = str(data.get("justification") or "").strip()[:2000]
+    status = "CONFIRMED" if decision_type.startswith("CONFIRM_") else "REJECTED" if decision_type.startswith("REJECT_") else "SAVED"
+    connection = connect()
+    try:
+        row = connection.execute(
+            """INSERT INTO document_decisions(
+                   run_id,document_key,decision_type,selected_ids_json,status,justification,user_id
+               ) VALUES (?,?,?,?,?,?,?)
+               ON CONFLICT(run_id,document_key,decision_type) DO UPDATE SET
+                   selected_ids_json=excluded.selected_ids_json,status=excluded.status,
+                   justification=excluded.justification,user_id=excluded.user_id,
+                   updated_at=CURRENT_TIMESTAMP
+               RETURNING *""",
+            (
+                detail["run_id"], document_id, decision_type,
+                json.dumps(selected_ids, ensure_ascii=False), status, justification,
+                int(_current_user()["id"]),
+            ),
+        ).fetchone()
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+    document = detail.get("document") or {}
+    _audit(
+        decision_type, "REGULARIZATION", entity_type="DOCUMENT", entity_id=document_id,
+        new_value={
+            "nf": document.get("numero_nfe"), "selected_ids": selected_ids,
+            "decision_status": status,
+        },
+        justification=justification,
+    )
+    payload = _row_dict(row)
+    payload["selected_ids"] = selected_ids
+    payload.pop("selected_ids_json", None)
+    return jsonify({"ok": True, "decision": payload})
 
 
 @app.post("/api/settings/rt-preference")
@@ -844,10 +1131,21 @@ def record_pending_action(reconciliation_id: int):
         return jsonify({"error": "Informe a justificativa do tratamento."}), 400
     connection = connect()
     try:
+        scoped = _scoped_filters({})
+        allowed_centers = scoped.get("allowed_centers")
         reconciliation = connection.execute(
-            "SELECT id,status,diagnosis FROM reconciliations WHERE id=?", (reconciliation_id,)
+            """SELECT r.id,r.status,r.diagnosis,e.center
+               FROM reconciliations r
+               JOIN expected_movements e ON e.id=r.expected_id
+               WHERE r.id=?""",
+            (reconciliation_id,),
         ).fetchone()
         if reconciliation is None:
+            return jsonify({"error": "Pendência não encontrada."}), 404
+        if allowed_centers is not None and str(reconciliation.get("center") or "") not in {
+            str(value) for value in allowed_centers
+        }:
+            # Do not reveal whether an identifier exists outside the caller's scope.
             return jsonify({"error": "Pendência não encontrada."}), 404
         entry = connection.execute(
             """INSERT INTO action_history(reconciliation_id,action,user_name,reason)
@@ -941,20 +1239,15 @@ def upload_data():
     upload.stream.seek(0)
     if extension == ".pdf" and not header.startswith(b"%PDF-"):
         return jsonify({"error": "O conteúdo enviado não é um PDF válido."}), 400
-    if extension == ".xlsx":
-        if not header.startswith(b"PK"):
-            return jsonify({"error": "O conteúdo enviado não é uma planilha XLSX válida."}), 400
-        try:
-            with zipfile.ZipFile(upload.stream) as archive:
-                active = [name for name in archive.namelist() if name.lower().endswith("vbaproject.bin")]
-                if active:
-                    return jsonify({"error": "Planilhas com macros não são permitidas."}), 400
-        except zipfile.BadZipFile:
-            return jsonify({"error": "A planilha XLSX está corrompida."}), 400
-        finally:
-            upload.stream.seek(0)
-    if extension == ".xls" and not header.startswith(bytes.fromhex("D0CF11E0")):
-        return jsonify({"error": "O conteúdo enviado não é uma planilha XLS válida."}), 400
+    if extension in {".xlsx", ".xls"}:
+        spreadsheet_error = _spreadsheet_upload_error(upload.stream, extension)
+        if spreadsheet_error:
+            return jsonify({"error": spreadsheet_error}), 400
+        if extension == ".xls" and header.startswith(b"PK"):
+            app.logger.info(
+                "Accepted OOXML workbook with legacy .xls filename",
+                extra={"source": source, "upload_filename": secure_filename(upload.filename)},
+            )
 
     from vercel.blob import BlobClient
 
@@ -970,7 +1263,9 @@ def upload_data():
 
     connection = connect()
     try:
-        batch = _get_or_create_batch(connection)
+        actor = _current_user()
+        batch = _get_or_create_batch(connection, actor)
+        created_by, scope_centers_json, scope_properties_json = _scope_snapshot(actor)
         connection.execute(
             """UPDATE import_jobs SET status='SUPERSEDED',finished_at=CURRENT_TIMESTAMP,
                updated_at=CURRENT_TIMESTAMP
@@ -979,11 +1274,15 @@ def upload_data():
         )
         job = connection.execute(
             """INSERT INTO import_jobs(
-                   batch_id,run_id,source,source_file,blob_path,blob_url,status
-               ) VALUES (?,?,?,?,?,?,'QUEUED') RETURNING *""",
+                   batch_id,run_id,created_by,scope_centers_json,scope_properties_json,
+                   source,source_file,blob_path,blob_url,status
+               ) VALUES (?,?,?,?,?,?,?,?,?,'QUEUED') RETURNING *""",
             (
                 batch["id"],
                 batch["run_id"],
+                created_by,
+                scope_centers_json,
+                scope_properties_json,
                 source,
                 secure_filename(upload.filename),
                 blob.pathname,
@@ -1040,7 +1339,11 @@ def start_import_job(job_id: int):
 def import_job_status(job_id: int):
     connection = connect()
     try:
-        job = connection.execute("SELECT * FROM import_jobs WHERE id=?", (job_id,)).fetchone()
+        owner_sql, owner_params = _owner_condition()
+        job = connection.execute(
+            "SELECT * FROM import_jobs WHERE id=?" + owner_sql,
+            [job_id, *owner_params],
+        ).fetchone()
         if job is None:
             return jsonify({"error": "Importação não encontrada."}), 404
         events = connection.execute(
@@ -1075,6 +1378,9 @@ def list_import_jobs():
         limit = max(1, min(500, int(request.args.get("limit", "100"))))
     except ValueError:
         return jsonify({"error": "limit deve ser numérico."}), 400
+    if not _is_admin():
+        clauses.append("created_by=?")
+        params.append(int(_current_user()["id"]))
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
     connection = connect()
     try:
@@ -1091,7 +1397,11 @@ def list_import_jobs():
 def latest_import_jobs():
     connection = connect()
     try:
-        batch = connection.execute("SELECT * FROM import_batches ORDER BY id DESC LIMIT 1").fetchone()
+        owner_sql, owner_params = _owner_condition()
+        batch = connection.execute(
+            "SELECT * FROM import_batches WHERE 1=1" + owner_sql + " ORDER BY id DESC LIMIT 1",
+            owner_params,
+        ).fetchone()
         if batch is None:
             return jsonify({"batch": None, "jobs": {}, "ready": False})
         readiness = _batch_readiness(connection, batch)
@@ -1101,6 +1411,7 @@ def latest_import_jobs():
 
 
 def _requested_batch(connection: Any, data: dict[str, Any]) -> Any:
+    owner_sql, owner_params = _owner_condition()
     candidates: set[int] = set()
     for value in data.get("batch_ids") or []:
         candidates.add(int(value))
@@ -1108,7 +1419,8 @@ def _requested_batch(connection: Any, data: dict[str, Any]) -> Any:
     if job_ids:
         placeholders = ",".join("?" for _ in job_ids)
         for row in connection.execute(
-            f"SELECT DISTINCT batch_id FROM import_jobs WHERE id IN ({placeholders})", job_ids
+            f"SELECT DISTINCT batch_id FROM import_jobs WHERE id IN ({placeholders})" + owner_sql,
+            [*job_ids, *owner_params],
         ):
             if row["batch_id"] is not None:
                 candidates.add(int(row["batch_id"]))
@@ -1116,12 +1428,14 @@ def _requested_batch(connection: Any, data: dict[str, Any]) -> Any:
         raise ValueError("Todos os jobs devem pertencer ao mesmo ciclo.")
     if candidates:
         return connection.execute(
-            "SELECT * FROM import_batches WHERE id=?", (next(iter(candidates)),)
+            "SELECT * FROM import_batches WHERE id=?" + owner_sql,
+            [next(iter(candidates)), *owner_params],
         ).fetchone()
     return connection.execute(
         """SELECT * FROM import_batches
            WHERE status IN ('OPEN','IMPORTING','FAILED','RECONCILIATION_STARTING','RECONCILING')
-           ORDER BY id DESC LIMIT 1"""
+        """ + owner_sql + " ORDER BY id DESC LIMIT 1",
+        owner_params,
     ).fetchone()
 
 
@@ -1206,7 +1520,11 @@ def reconcile_completed_sources():
 def reconciliation_status(batch_id: int):
     connection = connect()
     try:
-        batch = connection.execute("SELECT * FROM import_batches WHERE id=?", (batch_id,)).fetchone()
+        owner_sql, owner_params = _owner_condition()
+        batch = connection.execute(
+            "SELECT * FROM import_batches WHERE id=?" + owner_sql,
+            [batch_id, *owner_params],
+        ).fetchone()
         if batch is None:
             return jsonify({"error": "Ciclo não encontrado."}), 404
         readiness = _batch_readiness(connection, batch)
@@ -1217,6 +1535,14 @@ def reconciliation_status(batch_id: int):
 
 @app.get("/api/export/<fmt>/<page_name>")
 def export(fmt: str, page_name: str):
+    if fmt not in {"csv", "xlsx"} or page_name not in EXPORTABLE_PAGES:
+        return jsonify({"error": "Exportação não suportada."}), 404
+    user = _current_user()
+    modules = set(user.get("modules") or [])
+    if page_name not in modules and "*" not in modules:
+        return jsonify({"error": "Módulo não autorizado para este perfil."}), 403
+    if page_name == "logs" and not has_permission(user, "view_audit"):
+        return jsonify({"error": "Trilha de auditoria não autorizada."}), 403
     try:
         filters = _scoped_filters(request.args.to_dict())
     except PermissionError as error:
@@ -1240,8 +1566,6 @@ def export(fmt: str, page_name: str):
             "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             "Content-Disposition": f'attachment; filename="sisdev_{page_name}.xlsx"',
         }
-    else:
-        return jsonify({"error": "Formato não suportado."}), 404
     _audit(
         "EXPORT", "EXPORTS", entity_type="PAGE", entity_id=page_name,
         new_value={"format": fmt, "records": len(rows), "filters": filters},

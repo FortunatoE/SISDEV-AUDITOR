@@ -4,6 +4,9 @@
 CREATE TABLE IF NOT EXISTS import_batches (
   id BIGSERIAL PRIMARY KEY,
   run_id BIGINT NOT NULL,
+  created_by BIGINT,
+  scope_centers_json TEXT,
+  scope_properties_json TEXT,
   status TEXT NOT NULL DEFAULT 'OPEN',
   required_sources TEXT NOT NULL DEFAULT
     'sap_entry_current,sap_exit_current,sap_entry_history,sap_exit_history,sap_stock,sisdev_stock,sisdev_movement,agrotis_recipe',
@@ -18,6 +21,9 @@ CREATE TABLE IF NOT EXISTS import_jobs (
   id BIGSERIAL PRIMARY KEY,
   batch_id BIGINT,
   run_id BIGINT,
+  created_by BIGINT,
+  scope_centers_json TEXT,
+  scope_properties_json TEXT,
   source TEXT NOT NULL,
   source_file TEXT,
   blob_path TEXT NOT NULL,
@@ -45,6 +51,9 @@ CREATE TABLE IF NOT EXISTS import_jobs (
 -- Upgrade the original, smaller import_jobs table in place.
 ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS batch_id BIGINT;
 ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS run_id BIGINT;
+ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS created_by BIGINT;
+ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS scope_centers_json TEXT;
+ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS scope_properties_json TEXT;
 ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS source_file TEXT;
 ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS blob_url TEXT;
 ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS cursor_row INTEGER NOT NULL DEFAULT 0;
@@ -59,6 +68,10 @@ ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS warning_json TEXT;
 ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;
 ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ;
 ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS finished_at TIMESTAMPTZ;
+
+ALTER TABLE import_batches ADD COLUMN IF NOT EXISTS created_by BIGINT;
+ALTER TABLE import_batches ADD COLUMN IF NOT EXISTS scope_centers_json TEXT;
+ALTER TABLE import_batches ADD COLUMN IF NOT EXISTS scope_properties_json TEXT;
 
 CREATE TABLE IF NOT EXISTS import_job_events (
   id BIGSERIAL PRIMARY KEY,
@@ -90,6 +103,10 @@ CREATE INDEX IF NOT EXISTS import_jobs_batch_source_idx
   ON import_jobs(batch_id, source, created_at);
 CREATE INDEX IF NOT EXISTS import_jobs_workflow_idx
   ON import_jobs(workflow_run_id);
+CREATE INDEX IF NOT EXISTS import_jobs_owner_status_idx
+  ON import_jobs(created_by, status, created_at);
+CREATE INDEX IF NOT EXISTS import_batches_owner_status_idx
+  ON import_batches(created_by, status, created_at);
 CREATE INDEX IF NOT EXISTS import_job_events_job_idx
   ON import_job_events(job_id, created_at);
 CREATE INDEX IF NOT EXISTS reconciliation_mappings_type_idx

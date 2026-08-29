@@ -5,6 +5,7 @@ resultados/
 logs/
 tmp/
 config/local.*
+docs/security-audit/
 
 # Fontes de referência que podem conter dados empresariais.
 Acompanhamento SISDEV.xlsx

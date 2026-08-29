@@ -31,6 +31,8 @@ RECIPE_CACHE = {}
 PAGE_SIZES = {25, 50, 100, 250}
 MAX_SOURCE_ROWS = 250_000
 MAX_SOURCE_COLUMNS = 200
+BOA_ESPERANCA_NAME = "BOA ESPERANCA AGROPECUARIA"
+BOA_ESPERANCA_CNPJ_ROOT = "01722958"
 
 SITUATION_DESCRIPTIONS = {
     "PENDENTE": "Aguardando regularização no SISDEV",
@@ -43,6 +45,11 @@ SITUATION_DESCRIPTIONS = {
     "SALDO_PARCIAL": "Saldo SISDEV insuficiente para a quantidade necessária",
     "SEM_SALDO": "Nenhum saldo SISDEV disponível para o lote",
     "ERRO_CONCILIACAO": "A conciliação não pôde ser concluída",
+    "MOVIMENTACAO_NAO_LOCALIZADA": "Movimentação SISDEV compatível não localizada",
+    "PENDENTE_ESTORNO": "Retorno aguardando confirmação da movimentação original",
+    "ESTORNO_PARCIAL": "Estorno confirmado para parte da quantidade retornada",
+    "ESTORNO_COMPLETO": "Estorno confirmado para toda a quantidade retornada",
+    "ENTRADA_FORNECEDOR": "Entrada de fornecedor sem necessidade de receita ou estorno",
     "OK": "Dados disponíveis para conferência e regularização",
 }
 
@@ -57,6 +64,29 @@ RECOMMENDED_ACTIONS = {
     "PENDENTE": "Conferir os dados e realizar o lançamento no SISDEV.",
     "OK": "Conferir os dados apresentados e realizar o lançamento no SISDEV.",
     "ERRO_CONCILIACAO": "Revisar os dados de origem e executar novamente a conciliação.",
+    "MOVIMENTACAO_NAO_LOCALIZADA": "Revisar o vínculo entre a saída SAP e a movimentação SISDEV.",
+    "PENDENTE_ESTORNO": "Localizar e confirmar a saída original antes de realizar o estorno.",
+    "ESTORNO_PARCIAL": "Conferir a quantidade já estornada e concluir a diferença restante.",
+    "ESTORNO_COMPLETO": "Conferir o estorno registrado e concluir o tratamento da pendência.",
+    "ENTRADA_FORNECEDOR": "Conferir os dados da NF, material e lote e realizar a entrada no SISDEV.",
+}
+
+REGULARIZATION_PRIORITY = {
+    "SEM_SALDO": (100, "ALTA", "Não existe saldo para executar o lançamento."),
+    "PENDENTE_ESTORNO": (95, "ALTA", "O retorno depende da confirmação da saída original."),
+    "MOVIMENTACAO_NAO_LOCALIZADA": (90, "ALTA", "A movimentação original ainda não foi localizada."),
+    "DIVERGENTE": (85, "ALTA", "Há divergência entre SAP, SISDEV ou NF."),
+    "SALDO_PARCIAL": (80, "ALTA", "O saldo é menor que a quantidade necessária."),
+    "SEM_RECEITA": (75, "ALTA", "A saída não possui receita compatível."),
+    "RECEITAS_MULTIPLAS": (60, "MEDIA", "Há mais de uma receita possível para decisão humana."),
+    "LOTE_NAO_MAPEADO": (55, "MEDIA", "O lote precisa de correspondência confiável."),
+    "MATERIAL_NAO_MAPEADO": (55, "MEDIA", "O material precisa de correspondência confiável."),
+    "PENDENTE": (30, "BAIXA", "A pendência requer conferência operacional."),
+    "ESTORNO_PARCIAL": (30, "BAIXA", "Parte do estorno já foi confirmada."),
+    "OK": (10, "BAIXA", "Os dados estão prontos para conferência final."),
+    "ESTORNO_COMPLETO": (5, "BAIXA", "O estorno já foi confirmado."),
+    "ENTRADA_FORNECEDOR": (20, "BAIXA", "A entrada de fornecedor requer apenas os dados fiscais e do lote."),
+    "ERRO_CONCILIACAO": (85, "ALTA", "A regra de conciliação não pôde ser aplicada."),
 }
 
 REQUIRED_COLUMNS = {
@@ -261,7 +291,17 @@ def _read_source(source, path):
             raise ValueError(f"Fonte {source}: quantidade de registros acima do limite de {MAX_SOURCE_ROWS}.")
         return [(int(row.pop("_row_number")), row) for row in parsed]
     skiprows = SOURCE_BY_NAME[source][1]
-    frame = pd.read_excel(path, skiprows=skiprows, dtype=object).dropna(axis=1, how="all")
+    with path.open("rb") as source_file:
+        signature = source_file.read(8)
+    # Agrotis may name an OOXML workbook ``.xls``. Select the reader from the
+    # actual content so the API and asynchronous worker handle it consistently.
+    if signature.startswith(b"PK"):
+        excel_engine = "openpyxl"
+    elif signature.startswith(bytes.fromhex("D0CF11E0")):
+        excel_engine = "xlrd"
+    else:
+        excel_engine = None
+    frame = pd.read_excel(path, skiprows=skiprows, dtype=object, engine=excel_engine).dropna(axis=1, how="all")
     if len(frame.columns) > MAX_SOURCE_COLUMNS:
         raise ValueError(f"Fonte {source}: quantidade de colunas acima do limite de {MAX_SOURCE_COLUMNS}.")
     if len(frame.index) > MAX_SOURCE_ROWS:
@@ -770,7 +810,8 @@ def _filter_sql(filters, alias="e"):
     for request_key, column in (
         ("from", f"{alias}.doc_date >= ?"), ("to", f"{alias}.doc_date <= ?"),
         ("center", f"{alias}.center = ?"), ("direction", f"{alias}.direction = ?"),
-        ("nf", f"{alias}.nf = ?"),
+        ("nf", f"{alias}.nf = ?"), ("series", f"{alias}.series = ?"),
+        ("cnpj", f"{alias}.cnpj = ?"),
     ):
         if filters.get(request_key):
             clauses.append(column)
@@ -784,6 +825,18 @@ def _filter_sql(filters, alias="e"):
             placeholders = ",".join("?" for _ in allowed_centers)
             clauses.append(f"{alias}.center IN ({placeholders})")
             params.extend(allowed_centers)
+    if filters.get("product"):
+        clauses.append(f"{alias}.material_key = ?")
+        params.append(key(filters["product"]))
+    if filters.get("lot"):
+        clauses.append(f"({alias}.manufacturer_lot = ? OR {alias}.lot = ?)")
+        requested_lot = lot(filters["lot"])
+        params.extend((requested_lot, requested_lot))
+    if filters.get("lot_search"):
+        requested_lot = lot(filters["lot_search"])
+        if requested_lot:
+            clauses.append(f"({alias}.manufacturer_lot LIKE ? OR {alias}.lot LIKE ?)")
+            params.extend((f"%{requested_lot}%", f"%{requested_lot}%"))
     return (" AND " + " AND ".join(clauses) if clauses else ""), params
 
 
@@ -878,16 +931,32 @@ def dashboard_v2(filters=None):
       LEFT JOIN actual_movements a ON a.id=r.actual_id WHERE e.run_id=?""" + where + """
       AND r.status!='CORRETO' ORDER BY e.doc_date DESC,r.id DESC LIMIT 100"""
     rows = [dict(row) for row in conn.execute(rows_query, [run["id"], *params])]
+    option_where, option_params = _filter_sql({
+        "allowed_centers": filters.get("allowed_centers")
+    } if filters.get("allowed_centers") is not None else {})
     options = {
-        "centers": [row[0] for row in conn.execute("SELECT DISTINCT center FROM expected_movements WHERE run_id=? AND center<>'' ORDER BY 1", (run["id"],))],
+        "centers": [row[0] for row in conn.execute(
+            "SELECT DISTINCT e.center FROM expected_movements e WHERE e.run_id=? AND e.center<>''" + option_where + " ORDER BY 1",
+            [run["id"], *option_params],
+        )],
         "directions": [{"value": row[0], "label": "Entrada" if row[0] == "1" else "Saída" if row[0] == "2" else row[0]}
-                       for row in conn.execute("SELECT DISTINCT direction FROM expected_movements WHERE run_id=? ORDER BY 1", (run["id"],))],
-        "range": dict(conn.execute("SELECT MIN(doc_date) min_date,MAX(doc_date) max_date FROM expected_movements WHERE run_id=?", (run["id"],)).fetchone()),
+                       for row in conn.execute(
+                           "SELECT DISTINCT e.direction FROM expected_movements e WHERE e.run_id=?" + option_where + " ORDER BY 1",
+                           [run["id"], *option_params],
+                       )],
+        "range": dict(conn.execute(
+            "SELECT MIN(e.doc_date) min_date,MAX(e.doc_date) max_date FROM expected_movements e WHERE e.run_id=?" + option_where,
+            [run["id"], *option_params],
+        ).fetchone()),
     }
-    if filters.get("allowed_centers") is not None:
-        allowed = {text(value) for value in filters.get("allowed_centers") or []}
-        options["centers"] = [value for value in options["centers"] if value in allowed]
-    issues = [dict(row) for row in conn.execute("SELECT severity,category,message FROM audit_issues WHERE run_id=? ORDER BY id DESC LIMIT 8", (run["id"],))]
+    # audit_issues does not carry a center. Do not expose a global issue to a
+    # center-scoped user until the schema can prove ownership of that issue.
+    issues = [] if filters.get("allowed_centers") is not None else [
+        dict(row) for row in conn.execute(
+            "SELECT severity,category,message FROM audit_issues WHERE run_id=? ORDER BY id DESC LIMIT 8",
+            (run["id"],),
+        )
+    ]
     total = sum(statuses.values())
     correct = statuses["CORRETO"]
     launched = total - statuses["NAO_LANCADO"]
@@ -916,7 +985,7 @@ def _recipes_for_regularization(conn, run_id):
     if run_id in RECIPE_CACHE:
         return RECIPE_CACHE[run_id]
     recipes = []
-    for record in conn.execute("SELECT raw_json FROM source_records WHERE run_id=? AND source='agrotis_recipe' ORDER BY row_number", (run_id,)):
+    for record in conn.execute("SELECT id,row_number,raw_json FROM source_records WHERE run_id=? AND source='agrotis_recipe' ORDER BY row_number", (run_id,)):
         raw = json.loads(record["raw_json"])
         normalized = {key(column): value for column, value in raw.items()}
 
@@ -927,8 +996,12 @@ def _recipes_for_regularization(conn, run_id):
             return None
 
         recipes.append({
+            "source_record_id": record.get("id"),
+            "row_number": record.get("row_number"),
             "data_emissao": iso_date(recipe_field("Data de Emissão")),
             "produto": text(recipe_field("Produto")),
+            "material": text(recipe_field("Material", "Código Material")),
+            "lote": lot(recipe_field("Lote", "Lote Fabricante")),
             "numero_receita": text(recipe_field("Número do receituário")),
             "nota_fiscal": document(recipe_field("Nota Fiscal")),
             "art": text(recipe_field("ART")),
@@ -940,6 +1013,9 @@ def _recipes_for_regularization(conn, run_id):
             "area_receita": _recipe_number(recipe_field("Área")),
             "quantidade_receita": _recipe_number(recipe_field("Quantidade")),
             "unidade_receita": unit(recipe_field("Unidade Quantidade")),
+            "volume_embalagem": _recipe_number(recipe_field("Volume da Embalagem", "Volume da Embalagens")),
+            "quantidade_embalagem": _recipe_number(recipe_field("Quantidade de Embalagem", "Quantidade de Embalagens")),
+            "ure": text(recipe_field("URE", "Unidade recebimento de embalagem", "Unidade de Recebimento de Embalagem")),
             "nome_propriedade": text(recipe_field("Nome da Propriedade")),
             "nome_produtor": text(recipe_field("Nome Produtor")),
         })
@@ -1042,6 +1118,233 @@ def _select_recipe(recipes, expected_row, preferred_name=None, product_mappings=
     return None, candidates
 
 
+def _recipe_compatibility(recipe, expected_row, preferred_name=None, product_mappings=None, property_cnpj=None):
+    """Return an explainable suggestion score; it is never an automatic decision."""
+
+    score = 0.0
+    reasons = []
+    if _product_matches(expected_row.get("sap_material"), recipe.get("produto"), product_mappings):
+        score += 30
+        reasons.append("produto compatível")
+    if recipe.get("nota_fiscal") and recipe.get("nota_fiscal") == expected_row.get("nf"):
+        score += 25
+        reasons.append("NF informada na receita")
+    document_date = expected_row.get("doc_date")
+    if recipe.get("data_emissao") == document_date:
+        score += 15
+        reasons.append("emissão no mesmo dia")
+    elif document_date:
+        try:
+            previous = (datetime.strptime(document_date, "%Y-%m-%d").date() - timedelta(days=1)).isoformat()
+        except ValueError:
+            previous = ""
+        if recipe.get("data_emissao") == previous:
+            score += 10
+            reasons.append("emissão em D-1")
+    required = abs(float(expected_row.get("quantity") or 0))
+    supplied = abs(float(recipe.get("quantidade_receita") or 0))
+    if required and supplied:
+        distance = abs(required - supplied) / required
+        quantity_score = max(0.0, 20.0 * (1.0 - min(distance, 1.0)))
+        score += quantity_score
+        if distance <= 0.000001:
+            reasons.append("quantidade exata")
+        elif quantity_score >= 10:
+            reasons.append("quantidade próxima")
+    expected_cnpj = identifier(expected_row.get("cnpj"))
+    recipe_cnpj = (property_cnpj or {}).get(key(recipe.get("nome_propriedade")))
+    if expected_cnpj and recipe_cnpj == expected_cnpj:
+        score += 10
+        reasons.append("propriedade/CNPJ compatível")
+    if preferred_name and key(recipe.get("nome_rt")) == key(preferred_name):
+        score += 5
+        reasons.append("RT preferencial")
+    return min(100, int(round(score))), reasons
+
+
+def _sap_launch_status(raw):
+    value = field(
+        raw,
+        "Status de lançamento", "Status Lançamento", "Status", "Situação",
+        "Ícone", "Icone", "Semáforo", "Semaforo",
+    )
+    token = identifier(value)
+    return {
+        "A0": "LANCADO_MANUALMENTE",
+        "0V": "LANCADO_AUTOMATICAMENTE",
+        "1A": "DOCUMENTO_PENDENTE",
+    }.get(token, "NAO_INFORMADO")
+
+
+def _entry_origin(raw, fallback_cnpj=""):
+    """Classify an SAP entry by its issuer without involving recipe data."""
+
+    issuer = text(field(
+        raw, "Nome", "Fornecedor", "Nome fornecedor", "Nome do fornecedor",
+        "Emitente", "Nome emitente", "Razão Social", "Razao Social",
+    ))
+    issuer_cnpj = identifier(field(
+        raw, "CNPJ", "CNPJ fornecedor", "CNPJ Emitente", "CNPJ do emitente",
+    ) or fallback_cnpj)
+    internal = (
+        BOA_ESPERANCA_NAME in key(issuer)
+        or issuer_cnpj.startswith(BOA_ESPERANCA_CNPJ_ROOT)
+    )
+    return {
+        "emitente": issuer,
+        "cnpj_emitente": issuer_cnpj,
+        "tipo_entrada": "TRANSFERENCIA_RETORNO" if internal else "ENTRADA_FORNECEDOR",
+    }
+
+
+def _document_key(row):
+    direction_value = row.get("direcao") or row.get("direction")
+    direction_code = _expected_direction("", direction_value) or key(direction_value)
+    identity = "|".join((
+        document(row.get("numero_nf") or row.get("numero_nfe") or row.get("nf")),
+        _series(row.get("serie") or row.get("series")),
+        identifier(row.get("cnpj")),
+        direction_code,
+        key(row.get("centro") or row.get("center")),
+    ))
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+
+
+def _return_chain_context(conn, run_id):
+    """Load possible original exits once, avoiding one query per entry row."""
+
+    exits_by_material = defaultdict(list)
+    actual_ids = set()
+    reconciliations = {
+        int(item["expected_id"]): dict(item)
+        for item in conn.execute(
+            """SELECT id,expected_id,status reconciliation_status,actual_id
+               FROM reconciliations WHERE run_id=? AND expected_id IS NOT NULL""",
+            (run_id,),
+        )
+    }
+    for item in conn.execute(
+        """SELECT id,nf,series,doc_date,cnpj,center,sap_material,material_key,
+                  lot,manufacturer_lot,quantity,unit
+           FROM expected_movements
+           WHERE run_id=? AND direction='2'
+           ORDER BY doc_date DESC,id DESC""",
+        (run_id,),
+    ):
+        candidate = dict(item)
+        reconciliation = reconciliations.get(int(candidate["id"]), {})
+        candidate.update({
+            "reconciliation_id": reconciliation.get("id"),
+            "reconciliation_status": reconciliation.get("reconciliation_status"),
+            "actual_id": reconciliation.get("actual_id"),
+        })
+        exits_by_material[candidate.get("material_key")].append(candidate)
+        if candidate.get("actual_id"):
+            actual_ids.add(int(candidate["actual_id"]))
+    actuals = {}
+    if actual_ids:
+        ordered = sorted(actual_ids)
+        placeholders = ",".join("?" for _ in ordered)
+        actuals = {
+            int(item["id"]): dict(item)
+            for item in conn.execute(
+                f"SELECT * FROM actual_movements WHERE id IN ({placeholders})", ordered,
+            )
+        }
+    return {"exits_by_material": exits_by_material, "actuals": actuals}
+
+
+def _return_chain_for_item(conn, run_id, row, context=None):
+    if row.get("direction") != "1":
+        return None
+    if context is None:
+        context = _return_chain_context(conn, run_id)
+    document_date = row.get("doc_date") or ""
+    candidates = [
+        candidate
+        for candidate in context["exits_by_material"].get(row.get("material_key"), [])
+        if (not document_date or not candidate.get("doc_date") or candidate["doc_date"] <= document_date)
+        and candidate.get("nf") != row.get("nf")
+    ]
+    expected_lot = lot(row.get("manufacturer_lot") or row.get("lot"))
+    expected_cnpj = identifier(row.get("cnpj"))
+    expected_unit = unit(row.get("unit"))
+    compatible = [candidate for candidate in candidates if (
+        (not expected_lot or lot(candidate.get("manufacturer_lot") or candidate.get("lot")) == expected_lot)
+        and (not expected_unit or not candidate.get("unit") or unit(candidate.get("unit")) == expected_unit)
+    )]
+    # The context is already newest-first. A stable sort keeps that order while
+    # prioritizing exits associated with the same resale CNPJ.
+    compatible.sort(key=lambda candidate: (
+        0 if expected_cnpj and identifier(candidate.get("cnpj")) == expected_cnpj else 1
+    ))
+    compatible = compatible[:100]
+    originals, movements, seen_movements = [], [], set()
+    for candidate in compatible:
+        linked = dict(candidate)
+        movement = None
+        if candidate.get("actual_id"):
+            movement = context["actuals"].get(int(candidate["actual_id"]))
+        linked.update({
+            "movement_id": (movement or {}).get("id"),
+            "movement_status": (movement or {}).get("status"),
+            "movement_nf": (movement or {}).get("nf"),
+        })
+        originals.append(linked)
+        if movement and int(movement["id"]) not in seen_movements:
+            movement = dict(movement)
+            movement["quantidade_total"] = round(
+                abs(float(movement.get("quantity") or 0) * float(movement.get("volume") or 0)), 6,
+            )
+            movements.append(movement)
+            seen_movements.add(int(movement["id"]))
+    original = originals[0] if originals else None
+    movement = movements[0] if movements else None
+    required_quantity = abs(float(row.get("quantity") or 0))
+    matched_quantity = round(sum(abs(float(item.get("quantity") or 0)) for item in originals), 6)
+    return {
+        "status": "PENDENTE_ESTORNO" if movement else "MOVIMENTACAO_NAO_LOCALIZADA",
+        "original": original,
+        "movement": movement,
+        "originals": originals,
+        "movements": movements,
+        "required_quantity": round(required_quantity, 6),
+        "matched_quantity": matched_quantity,
+        "remaining_quantity": round(max(0.0, required_quantity - matched_quantity), 6),
+        "candidate_count": len(originals),
+        "truncated": len(compatible) >= 100,
+    }
+
+
+def _merge_return_chains(chains):
+    chains = [chain for chain in chains if chain]
+    if not chains:
+        return None
+    originals, movements = {}, {}
+    for chain in chains:
+        for item in chain.get("originals") or ([chain.get("original")] if chain.get("original") else []):
+            originals[int(item.get("id") or len(originals) + 1)] = item
+        for item in chain.get("movements") or ([chain.get("movement")] if chain.get("movement") else []):
+            movements[int(item.get("id") or len(movements) + 1)] = item
+    original_rows = list(originals.values())
+    movement_rows = list(movements.values())
+    required = round(sum(float(chain.get("required_quantity") or 0) for chain in chains), 6)
+    matched = round(sum(abs(float(item.get("quantity") or 0)) for item in original_rows), 6)
+    return {
+        "status": "PENDENTE_ESTORNO" if movement_rows else "MOVIMENTACAO_NAO_LOCALIZADA",
+        "original": original_rows[0] if original_rows else None,
+        "movement": movement_rows[0] if movement_rows else None,
+        "originals": original_rows,
+        "movements": movement_rows,
+        "required_quantity": required,
+        "matched_quantity": matched,
+        "remaining_quantity": round(max(0.0, required - matched), 6),
+        "candidate_count": len(original_rows),
+        "items": chains,
+        "truncated": any(chain.get("truncated") for chain in chains),
+    }
+
+
 def _stock_lookup(conn, run_id):
     index = {}
     for row in _stock_rows(conn, run_id):
@@ -1095,10 +1398,13 @@ def _regularization_rows(conn, run_id, preferred_name=None, filters=None):
     product_mappings = _mapping_dict(conn, "material_product")
     property_cnpj = _property_cnpj_map(conn)
     stock = _stock_lookup(conn, run_id)
+    return_context = _return_chain_context(conn, run_id)
     where, params = _filter_sql(filters)
     expected = conn.execute(
-        """SELECT e.doc_date,e.cnpj,e.nf,e.series,e.direction,e.sap_material,e.lot,e.manufacturer_lot,
-        e.quantity,e.unit,e.center,r.status reconciliation_status,r.diagnosis,r.confidence,s.raw_json FROM reconciliations r
+        """SELECT e.id expected_id,e.source_record_id,e.doc_date,e.cnpj,e.nf,e.series,e.direction,
+        e.sap_material,e.material_key,e.lot,e.manufacturer_lot,e.quantity,e.unit,e.center,
+        r.id reconciliation_id,r.actual_id,r.status reconciliation_status,r.diagnosis,r.details_json,
+        r.confidence,s.source sap_source,s.raw_json FROM reconciliations r
         JOIN expected_movements e ON e.id=r.expected_id JOIN source_records s ON s.id=e.source_record_id
         WHERE r.run_id=? AND r.status='NAO_LANCADO'""" + where +
         " ORDER BY e.doc_date DESC,e.nf,e.id", [run_id, *params],
@@ -1109,6 +1415,9 @@ def _regularization_rows(conn, run_id, preferred_name=None, filters=None):
         raw = json.loads(row.pop("raw_json"))
         direction = "Entrada" if row["direction"] == "1" else "Saída" if row["direction"] == "2" else row["direction"]
         base = {
+            "expected_id": row["expected_id"], "reconciliation_id": row["reconciliation_id"],
+            "actual_id": row["actual_id"], "sap_source": row["sap_source"],
+            "material_key": row["material_key"],
             "direcao": direction, "data_documento": row["doc_date"], "cnpj": row["cnpj"],
             "numero_nf": row["nf"], "numero_nfe": row["nf"], "serie": row["series"], "produto": row["sap_material"],
             "lote": row["manufacturer_lot"] or row["lot"], "lote_sap": row["lot"],
@@ -1119,18 +1428,32 @@ def _regularization_rows(conn, run_id, preferred_name=None, filters=None):
             "fornecedor": text(field(raw, "Fornecedor", "Nome fornecedor")),
             "centro": row["center"],
             "status_conciliacao": row["reconciliation_status"],
+            "status_lancamento_sap": _sap_launch_status(raw),
             "confianca": row["confidence"],
         }
         base["quantidade_embalagem"] = base["quantidade_embalagens"]
         if direction == "Entrada":
+            origin = _entry_origin(raw, row.get("cnpj"))
+            base.update(origin)
+            return_chain = (
+                _return_chain_for_item(conn, run_id, row, return_context)
+                if origin["tipo_entrada"] == "TRANSFERENCIA_RETORNO" else None
+            )
+            situation = return_chain["status"] if return_chain else "ENTRADA_FORNECEDOR"
             base.update({
-                "situacao": "PENDENTE",
-                "situacao_descricao": SITUATION_DESCRIPTIONS["PENDENTE"],
+                "situacao": situation,
+                "situacao_descricao": SITUATION_DESCRIPTIONS[situation],
                 "status_saldo_codigo": "NAO_APLICAVEL",
                 "status_saldo": "Não aplicável à regularização de entrada.",
-                "acao_recomendada": "Conferir NF, embalagem e realizar o lançamento de entrada no SISDEV.",
+                "acao_recomendada": RECOMMENDED_ACTIONS[situation],
+                "status_operacional": situation,
+                "retorno_original_encontrado": bool(return_chain and return_chain.get("originals")),
+                "movimentacao_sugerida_id": ((return_chain or {}).get("movement") or {}).get("id"),
+                "movimentacoes_sugeridas_count": len((return_chain or {}).get("movements") or []),
+                "receitas_candidatas_count": 0,
+                "compatibilidade_melhor": 0,
                 "classificacao_automacao": "REVISAO_HUMANA",
-                "pendencia": "Conferir embalagem e efetuar o lançamento de entrada.",
+                "pendencia": SITUATION_DESCRIPTIONS[situation],
             })
             rows.append(base)
             continue
@@ -1141,6 +1464,12 @@ def _regularization_rows(conn, run_id, preferred_name=None, filters=None):
             stock_row = stock.get((text(row["center"]), preferred_product, preferred_lot, ""))
         base.update(_balance_diagnostic(stock_row, row["quantity"], unit(row["unit"])))
         recipe, candidates = _select_recipe(recipe_index, row, preferred_name, product_mappings, property_cnpj)
+        candidate_scores = [
+            _recipe_compatibility(candidate, row, preferred_name, product_mappings, property_cnpj)[0]
+            for candidate in candidates
+        ]
+        base["receitas_candidatas_count"] = len(candidates)
+        base["compatibilidade_melhor"] = max(candidate_scores, default=0)
         if recipe:
             emission_window = "D" if recipe["data_emissao"] == row["doc_date"] else "D-1"
             dose, dose_type = _normalized_dose(recipe["dose_recomendada"], recipe["tipo_dosagem"])
@@ -1175,6 +1504,7 @@ def _regularization_rows(conn, run_id, preferred_name=None, filters=None):
             "situacao": situation,
             "situacao_descricao": SITUATION_DESCRIPTIONS[situation],
             "acao_recomendada": RECOMMENDED_ACTIONS[situation],
+            "status_operacional": situation,
             "classificacao_automacao": "CANDIDATO_AUTOMACAO" if situation == "OK" and key(row["confidence"]) == "ALTA" else "REVISAO_HUMANA",
         })
         rows.append(base)
@@ -1186,6 +1516,292 @@ def _regularization_rows(conn, run_id, preferred_name=None, filters=None):
         allowed = {key(value) for value in allowed_properties if text(value)}
         rows = [row for row in rows if key(row.get("nome_propriedade")) in allowed] if allowed else []
     return rows
+
+
+def _priority(situation):
+    return REGULARIZATION_PRIORITY.get(
+        key(situation), (40, "MEDIA", "A situação requer análise operacional."),
+    )
+
+
+def _group_regularization_documents(conn, run_id, rows):
+    groups = defaultdict(list)
+    for row in rows:
+        groups[_document_key(row)].append(row)
+
+    decision_status = {
+        row["document_key"]: (
+            "TRATADO" if row["status"] == "CONFIRMED"
+            else "EM_ANALISE" if row["status"] == "SAVED"
+            else "PENDENTE"
+        )
+        for row in conn.execute(
+            "SELECT document_key,status FROM document_decisions WHERE run_id=? ORDER BY updated_at",
+            (run_id,),
+        )
+    }
+    queue = []
+    balance_rank = {"SEM_SALDO": 3, "SALDO_PARCIAL": 2, "OK": 1, "NAO_APLICAVEL": 0}
+    for document_key, items in groups.items():
+        lead = max(items, key=lambda item: _priority(item.get("situacao"))[0])
+        priority_weight, priority, priority_reason = _priority(lead.get("situacao"))
+        worst_balance = max(
+            items, key=lambda item: balance_rank.get(key(item.get("status_saldo_codigo")), -1)
+        )
+        products = sorted({text(item.get("produto")) for item in items if text(item.get("produto"))})
+        lots = sorted({lot(item.get("lote")) for item in items if lot(item.get("lote"))})
+        volumes = sorted({float(item["volume_embalagem"]) for item in items if item.get("volume_embalagem") is not None})
+        package_quantity = sum(float(item.get("quantidade_embalagem") or 0) for item in items)
+        candidate_count = max(int(item.get("receitas_candidatas_count") or 0) for item in items)
+        diagnosis = lead.get("situacao_descricao") or lead.get("pendencia") or lead.get("status_conciliacao")
+        if lead.get("situacao") == "RECEITAS_MULTIPLAS":
+            diagnosis = f"Foram encontradas {candidate_count} receitas possíveis. Verifique a compatibilidade antes de confirmar."
+        elif len(items) > 1:
+            diagnosis = f"{diagnosis} Documento consolidado com {len(items)} itens e {len(lots)} lotes."
+        product_summary = products[0] if len(products) == 1 else f"{len(items)} itens / {len(products)} produtos"
+        volume_summary = volumes[0] if len(volumes) == 1 else ("Múltiplos" if volumes else None)
+        queue.append({
+            "document_id": document_key,
+            "prioridade": priority,
+            "prioridade_peso": priority_weight,
+            "motivo_prioridade": priority_reason,
+            "situacao": lead.get("situacao"),
+            "diagnostico_situacao": diagnosis,
+            "situacao_descricao": diagnosis,
+            "status_saldo": worst_balance.get("status_saldo"),
+            "status_saldo_codigo": worst_balance.get("status_saldo_codigo"),
+            "acao_recomendada": lead.get("acao_recomendada"),
+            "numero_nfe": lead.get("numero_nfe"),
+            "numero_nf": lead.get("numero_nf"),
+            "serie": lead.get("serie"),
+            "data_documento": lead.get("data_documento"),
+            "cnpj": lead.get("cnpj"),
+            "produto": product_summary,
+            "volume_embalagem": volume_summary,
+            "quantidade_embalagem": round(package_quantity, 6),
+            "direcao": lead.get("direcao"),
+            "centro": lead.get("centro"),
+            "itens_count": len(items),
+            "lotes_count": len(lots),
+            "produtos_count": len(products),
+            "itens_resumo": f"{len(items)} itens / {len(lots)} lotes" if len(items) > 1 else "1 item",
+            "compatibilidade": max(float(item.get("compatibilidade_melhor") or 0) for item in items),
+            "status_lancamento_sap": lead.get("status_lancamento_sap"),
+            "status_operacional": lead.get("status_operacional"),
+            "status_conciliacao": lead.get("status_conciliacao"),
+            "tratamento_status": decision_status.get(document_key, "PENDENTE"),
+            "emitente": lead.get("emitente"),
+            "tipo_entrada": lead.get("tipo_entrada"),
+        })
+    return queue
+
+
+def _regularization_queue_rows(conn, run_id, preferred_name=None, filters=None):
+    detailed_filters = dict(filters or {})
+    detailed_filters["status"] = ""
+    detailed = _regularization_rows(conn, run_id, preferred_name, detailed_filters)
+    rows = _group_regularization_documents(conn, run_id, detailed)
+    requested_status = key((filters or {}).get("status"))
+    if requested_status and requested_status != "TODOS":
+        rows = [row for row in rows if requested_status in {
+            key(row.get("situacao")), key(row.get("status_saldo_codigo")),
+            key(row.get("status_operacional")), key(row.get("status_conciliacao")),
+            key(row.get("tratamento_status")),
+        }]
+    return rows
+
+
+def _regularization_lot_options(conn, run_id, filters=None):
+    option_filters = dict(filters or {})
+    option_filters.pop("product", None)
+    option_filters.pop("lot", None)
+    option_filters.pop("lot_search", None)
+    option_filters.pop("status", None)
+    option_filters.pop("nf", None)
+    where, params = _filter_sql(option_filters)
+    rows = conn.execute(
+        """SELECT DISTINCT e.sap_material,e.material_key,
+                  COALESCE(NULLIF(e.manufacturer_lot,''),e.lot) preferred_lot
+           FROM reconciliations r
+           JOIN expected_movements e ON e.id=r.expected_id
+           WHERE r.run_id=? AND r.status='NAO_LANCADO'""" + where +
+        " ORDER BY e.sap_material,preferred_lot",
+        [run_id, *params],
+    )
+    return [
+        {
+            "label": f"{text(row['sap_material'])} & {lot(row['preferred_lot'])}",
+            "product": text(row["material_key"]),
+            "lot": lot(row["preferred_lot"]),
+        }
+        for row in rows if text(row["sap_material"]) and lot(row["preferred_lot"])
+    ]
+
+
+def _safe_json(value, fallback=None):
+    if value in (None, ""):
+        return fallback
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return fallback
+
+
+def _regularization_document_filters(conn, run_id, document_key, filters=None):
+    """Resolve an opaque queue key using only indexed document columns."""
+
+    where, params = _filter_sql(filters)
+    candidates = conn.execute(
+        """SELECT DISTINCT e.nf,e.series,e.cnpj,e.direction,e.center
+           FROM reconciliations r
+           JOIN expected_movements e ON e.id=r.expected_id
+           WHERE r.run_id=? AND r.status='NAO_LANCADO'""" + where,
+        [run_id, *params],
+    )
+    for candidate in candidates:
+        identity = dict(candidate)
+        if _document_key(identity) == document_key:
+            targeted = dict(filters or {})
+            # Produto/lote servem para localizar a nota na fila, não para
+            # recortar seus itens quando o usuário abre o detalhe completo.
+            targeted.pop("product", None)
+            targeted.pop("lot", None)
+            targeted.pop("lot_search", None)
+            targeted.update({
+                "nf": identity.get("nf") or "",
+                "series": identity.get("series") or "",
+                "cnpj": identity.get("cnpj") or "",
+                "direction": identity.get("direction") or "",
+                "center": identity.get("center") or "",
+                "status": "",
+            })
+            return targeted
+    return None
+
+
+def regularization_document_detail(document_key, filters=None):
+    """Build the traceability tree for one NF only, on demand."""
+
+    conn = connect()
+    try:
+        run = _latest_success(conn)
+        if not run:
+            return None
+        preference = (filters or {}).get("preferred_rt") or preferred_rt(conn)
+        targeted_filters = _regularization_document_filters(conn, run["id"], document_key, filters)
+        if targeted_filters is None:
+            return None
+        rows = _regularization_rows(conn, run["id"], preference, targeted_filters)
+        items = [row for row in rows if _document_key(row) == document_key]
+        if not items:
+            return None
+        document_summary = _group_regularization_documents(conn, run["id"], items)[0]
+        recipes = _recipes_for_regularization(conn, run["id"])
+        recipe_index = _recipe_date_index(recipes)
+        product_mappings = _mapping_dict(conn, "material_product")
+        property_cnpj = _property_cnpj_map(conn)
+        recipe_options = {}
+        for item in (item for item in items if item.get("direcao") == "Saída"):
+            expected = {
+                "doc_date": item.get("data_documento"), "sap_material": item.get("produto"),
+                "nf": item.get("numero_nf"), "quantity": item.get("quantidade_sap"),
+                "cnpj": item.get("cnpj"),
+            }
+            _selected, candidates = _select_recipe(
+                recipe_index, expected, preference, product_mappings, property_cnpj,
+            )
+            for recipe in candidates:
+                score, reasons = _recipe_compatibility(
+                    recipe, expected, preference, product_mappings, property_cnpj,
+                )
+                recipe_id = str(recipe.get("source_record_id") or recipe.get("numero_receita") or recipe.get("row_number"))
+                option = dict(recipe)
+                option.update({
+                    "recipe_id": recipe_id,
+                    "compatibilidade": score,
+                    "compatibilidade_motivos": reasons,
+                    "volume_relacionado": recipe.get("quantidade_receita"),
+                })
+                current = recipe_options.get(recipe_id)
+                if current is None or score > current["compatibilidade"]:
+                    recipe_options[recipe_id] = option
+        recipe_options = sorted(
+            recipe_options.values(), key=lambda item: (-item["compatibilidade"], item.get("numero_receita") or ""),
+        )
+        if recipe_options:
+            recipe_options[0]["mais_compativel"] = True
+
+        actual_ids = sorted({int(item["actual_id"]) for item in items if item.get("actual_id")})
+        actuals = []
+        if actual_ids:
+            placeholders = ",".join("?" for _ in actual_ids)
+            actuals = [dict(row) for row in conn.execute(
+                f"SELECT * FROM actual_movements WHERE id IN ({placeholders}) ORDER BY movement_date,id",
+                actual_ids,
+            )]
+        reconciliations = []
+        reconciliation_ids = sorted({int(item["reconciliation_id"]) for item in items if item.get("reconciliation_id")})
+        if reconciliation_ids:
+            placeholders = ",".join("?" for _ in reconciliation_ids)
+            reconciliations = [dict(row) for row in conn.execute(
+                f"SELECT * FROM reconciliations WHERE id IN ({placeholders}) ORDER BY id", reconciliation_ids,
+            )]
+            for reconciliation in reconciliations:
+                reconciliation["details"] = _safe_json(reconciliation.pop("details_json", None), {})
+
+        return_chains = []
+        for entry in (
+            item for item in items
+            if item.get("direcao") == "Entrada" and item.get("tipo_entrada") == "TRANSFERENCIA_RETORNO"
+        ):
+            return_chains.append(_return_chain_for_item(conn, run["id"], {
+                "direction": "1", "material_key": entry.get("material_key"),
+                "doc_date": entry.get("data_documento"), "nf": entry.get("numero_nf"),
+                "manufacturer_lot": entry.get("lote"), "lot": entry.get("lote_sap"),
+                "quantity": entry.get("quantidade_sap"), "unit": entry.get("unidade_sap"),
+                "cnpj": entry.get("cnpj"),
+            }))
+        return_chain = _merge_return_chains(return_chains)
+
+        decisions = [dict(row) for row in conn.execute(
+            """SELECT decision_type,selected_ids_json,status,justification,user_id,created_at,updated_at
+               FROM document_decisions WHERE run_id=? AND document_key=? ORDER BY updated_at DESC""",
+            (run["id"], document_key),
+        )]
+        for decision in decisions:
+            decision["selected_ids"] = _safe_json(decision.pop("selected_ids_json", None), [])
+        history = []
+        if reconciliation_ids:
+            placeholders = ",".join("?" for _ in reconciliation_ids)
+            history.extend(dict(row) for row in conn.execute(
+                f"""SELECT action,user_name usuario,reason justificativa,created_at data_hora
+                    FROM action_history WHERE reconciliation_id IN ({placeholders}) ORDER BY created_at DESC""",
+                reconciliation_ids,
+            ))
+        history.extend(dict(row) for row in conn.execute(
+            """SELECT action,user_email usuario,justification justificativa,result,created_at data_hora
+               FROM audit_log WHERE module='REGULARIZATION' AND entity_id=? ORDER BY created_at DESC LIMIT 100""",
+            (document_key,),
+        ))
+        required = round(sum(abs(float(item.get("quantidade_sap") or 0)) for item in items), 6)
+        single_match = any(
+            abs(float(recipe.get("quantidade_receita") or 0) - required) <= max(0.001, required * 0.000001)
+            for recipe in recipe_options
+        )
+        selection_mode = "SINGLE" if single_match or len(recipe_options) <= 1 else "MULTIPLE"
+        return {
+            "run_id": run["id"], "document_id": document_key, "document": document_summary,
+            "items": items, "recipes": recipe_options, "sap": items, "sisdev": actuals,
+            "reconciliation": reconciliations,
+            "balance": [{key_name: item.get(key_name) for key_name in (
+                "produto", "lote", "status_saldo_codigo", "status_saldo", "saldo_disponivel",
+                "saldo_necessario", "saldo_apos_lancamento", "falta_saldo", "saldo_unidade",
+            )} for item in items],
+            "return_chain": return_chain, "decisions": decisions, "history": history,
+            "recipe_selection": {"mode": selection_mode, "required": required},
+        }
+    finally:
+        conn.close()
 
 
 def regularization_export_rows(filters=None):
@@ -1208,7 +1824,18 @@ def regularization_export_rows(filters=None):
     }
     result = []
     for row in rows:
-        selected = {name: row.get(source_name) for name, source_name in columns.items()}
+        if row.get("direcao") == "Entrada":
+            entry_columns = {
+                "Data documento": "data_documento", "CNPJ": "cnpj",
+                "Número de nota fiscal eletrônica": "numero_nf", "Séries": "serie",
+                "Emitente": "emitente", "Tipo de entrada": "tipo_entrada",
+                "Produto": "produto", "Lote": "lote", "Quantidade": "quantidade_sap",
+                "Volume da embalagem": "volume_embalagem",
+                "Quantidade de embalagem": "quantidade_embalagens",
+            }
+            selected = {name: row.get(source_name) for name, source_name in entry_columns.items()}
+        else:
+            selected = {name: row.get(source_name) for name, source_name in columns.items()}
         selected["Situação"] = row.get("situacao")
         selected["Status saldo"] = row.get("status_saldo")
         selected["Ação recomendada"] = row.get("acao_recomendada")
@@ -1418,7 +2045,9 @@ def _direction_in_filter(value, filters):
 
 def page_records_v2(page, filters=None):
     filters = filters or {}
+    pagination_filters = filters
     data = dashboard_v2(filters)
+    filter_options = {}
     if not data.get("ready"):
         return data
     conn = connect()
@@ -1478,12 +2107,24 @@ def page_records_v2(page, filters=None):
         if requested_status and requested_status != "TODOS":
             rows = [row for row in rows if key(row.get("status")) == requested_status]
     elif page == "regularization":
-        rows = _regularization_rows(conn, run_id, filters.get("preferred_rt") or preferred_rt(conn), filters)
+        rows = _regularization_queue_rows(conn, run_id, filters.get("preferred_rt") or preferred_rt(conn), filters)
+        filter_options["product_lots"] = _regularization_lot_options(conn, run_id, filters)
         summary = {
             "total": len(rows), "entries": sum(row["direcao"] == "Entrada" for row in rows),
             "exits": sum(row["direcao"] == "Saída" for row in rows),
-            "recipes_suggested": sum(row["situacao"] == "RECEITA_SUGERIDA" for row in rows),
+            "recipes_suggested": sum(row["situacao"] == "RECEITAS_MULTIPLAS" for row in rows),
         }
+        pagination_filters = dict(filters)
+        sort_map = {
+            "prioridade": "prioridade_peso", "data": "data_documento",
+            "nf": "numero_nfe", "status": "situacao",
+            "compatibilidade": "compatibilidade", "centro": "centro",
+        }
+        requested_sort = text(filters.get("sort"))
+        if requested_sort:
+            pagination_filters["sort"] = sort_map.get(requested_sort, requested_sort)
+        else:
+            pagination_filters.update({"sort": "prioridade_peso", "order": "desc"})
     elif page == "recipes":
         rows = _recipe_page_rows(conn, run_id)
         rows = [row for row in rows if _date_in_filters(row["data_emissao"], filters)]
@@ -1494,6 +2135,9 @@ def page_records_v2(page, filters=None):
             rows = [row for row in rows if key(row.get("nome_propriedade")) in allowed] if allowed else []
     elif page == "stocks":
         rows = _stock_rows(conn, run_id)
+        if filters.get("allowed_centers") is not None:
+            allowed = {text(value) for value in filters.get("allowed_centers") or []}
+            rows = [row for row in rows if text(row.get("centro")) in allowed]
         if filters.get("center"):
             rows = [row for row in rows if key(row["centro"]) == key(filters["center"])]
     elif page == "reports":
@@ -1512,12 +2156,17 @@ def page_records_v2(page, filters=None):
     elif page == "movements":
         rows = [dict(row) for row in conn.execute(
             """SELECT nf,series,CASE lower(movement_type) WHEN 'entrada' THEN 'Entrada' WHEN 'saida' THEN 'Saída' ELSE movement_type END direcao,
-            movement_date,product,lot,quantity embalagens,volume volume_embalagem,ABS(quantity*volume) quantidade_total,unit,status
+            movement_date,product,lot,quantity embalagens,volume volume_embalagem,ABS(quantity*volume) quantidade_total,unit,status,cnpj
             FROM actual_movements WHERE run_id=? ORDER BY movement_date DESC""", (run_id,),
         )]
+        center_map = _center_by_cnpj(conn, run_id)
         for row in rows:
             direction_code = _movement_direction(row["direcao"])
             row["direcao"] = "Entrada" if direction_code == "1" else "Saída" if direction_code == "2" else row["direcao"]
+            row["centro"] = center_map.get(identifier(row.get("cnpj")), center_map.get("", ""))
+        if filters.get("allowed_centers") is not None:
+            allowed = {text(value) for value in filters.get("allowed_centers") or []}
+            rows = [row for row in rows if text(row.get("centro")) in allowed]
         rows = [row for row in rows if _date_in_filters(row["movement_date"], filters)
                 and _direction_in_filter(row["direcao"], filters)]
     elif page == "analysis":
@@ -1548,18 +2197,46 @@ def page_records_v2(page, filters=None):
             expected_where + " GROUP BY e.direction", [run_id, *expected_params],
         )]
     elif page == "units_measure":
-        rows = [dict(row) for row in conn.execute(
-            "SELECT unit unidade,COUNT(*) ocorrencias FROM actual_movements WHERE run_id=? GROUP BY unit ORDER BY ocorrencias DESC", (run_id,),
+        measures = [dict(row) for row in conn.execute(
+            "SELECT unit,cnpj FROM actual_movements WHERE run_id=?", (run_id,),
         )]
+        if filters.get("allowed_centers") is not None:
+            allowed = {text(value) for value in filters.get("allowed_centers") or []}
+            center_map = _center_by_cnpj(conn, run_id)
+            measures = [
+                row for row in measures
+                if text(center_map.get(identifier(row.get("cnpj")), center_map.get("", ""))) in allowed
+            ]
+        counts = defaultdict(int)
+        for row in measures:
+            counts[text(row.get("unit"))] += 1
+        rows = [
+            {"unidade": measure, "ocorrencias": count}
+            for measure, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+        ]
     elif page == "history":
-        rows = [dict(row) for row in conn.execute(
-            "SELECT source,source_file,COUNT(*) linhas FROM source_records WHERE run_id=? GROUP BY source,source_file ORDER BY source", (run_id,),
-        )]
+        if filters.get("allowed_centers") is None:
+            rows = [dict(row) for row in conn.execute(
+                "SELECT source,source_file,COUNT(*) linhas FROM source_records WHERE run_id=? GROUP BY source,source_file ORDER BY source", (run_id,),
+            )]
+        else:
+            rows = [dict(row) for row in conn.execute(
+                """SELECT s.source,s.source_file,COUNT(*) linhas
+                   FROM source_records s
+                   JOIN expected_movements e ON e.source_record_id=s.id
+                   WHERE s.run_id=?""" + expected_where +
+                " GROUP BY s.source,s.source_file ORDER BY s.source",
+                [run_id, *expected_params],
+            )]
     elif page == "logs":
+        log_where, log_params = "", []
+        if filters.get("actor_user_id") is not None:
+            log_where, log_params = " WHERE user_id=?", [int(filters["actor_user_id"])]
         rows = [dict(row) for row in conn.execute(
             """SELECT id,user_email usuario,created_at data_hora,action acao,module modulo,
                entity_type entidade,entity_id identificador,result resultado,justification justificativa
-               FROM audit_log ORDER BY id DESC"""
+               FROM audit_log""" + log_where + " ORDER BY id DESC",
+            log_params,
         )]
     elif page == "rules":
         rows = [
@@ -1587,6 +2264,9 @@ def page_records_v2(page, filters=None):
     requested_status = key(filters.get("status"))
     if requested_status and requested_status != "TODOS" and page not in {"pending", "regularization"}:
         rows = [row for row in rows if key(row.get("status") or row.get("situacao")) == requested_status]
-    rows, pagination = _paginate_rows(rows, filters)
+    rows, pagination = _paginate_rows(rows, pagination_filters)
     conn.close()
-    return {"page": page, "rows": rows, "summary": summary, "pagination": pagination}
+    return {
+        "page": page, "rows": rows, "summary": summary,
+        "pagination": pagination, "filter_options": filter_options,
+    }

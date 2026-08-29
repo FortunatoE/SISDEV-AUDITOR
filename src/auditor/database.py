@@ -127,6 +127,9 @@ def _base_statements(id_type: str, timestamp_type: str) -> list[str]:
 
 
 IMPORT_JOB_COLUMNS: dict[str, str] = {
+    "created_by": "BIGINT",
+    "scope_centers_json": "TEXT",
+    "scope_properties_json": "TEXT",
     "batch_id": "BIGINT",
     "run_id": "BIGINT",
     "source": "TEXT",
@@ -153,6 +156,12 @@ IMPORT_JOB_COLUMNS: dict[str, str] = {
     "updated_at": "TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP",
 }
 
+IMPORT_BATCH_COLUMNS: dict[str, str] = {
+    "created_by": "BIGINT",
+    "scope_centers_json": "TEXT",
+    "scope_properties_json": "TEXT",
+}
+
 
 def _orchestration_create_statements(id_type: str, timestamp_type: str) -> list[str]:
     required = ",".join(REQUIRED_IMPORT_SOURCES)
@@ -160,6 +169,9 @@ def _orchestration_create_statements(id_type: str, timestamp_type: str) -> list[
         f"""CREATE TABLE IF NOT EXISTS import_batches (
             id {id_type} PRIMARY KEY,
             run_id BIGINT NOT NULL,
+            created_by BIGINT,
+            scope_centers_json TEXT,
+            scope_properties_json TEXT,
             status TEXT NOT NULL DEFAULT 'OPEN',
             required_sources TEXT NOT NULL DEFAULT '{required}',
             reconciliation_workflow_run_id TEXT,
@@ -172,6 +184,9 @@ def _orchestration_create_statements(id_type: str, timestamp_type: str) -> list[
             id {id_type} PRIMARY KEY,
             batch_id BIGINT,
             run_id BIGINT,
+            created_by BIGINT,
+            scope_centers_json TEXT,
+            scope_properties_json TEXT,
             source TEXT NOT NULL,
             source_file TEXT,
             blob_path TEXT NOT NULL,
@@ -238,6 +253,7 @@ def _security_create_statements(id_type: str, timestamp_type: str) -> list[str]:
             failed_login_count INTEGER NOT NULL DEFAULT 0,
             locked_until {timestamp_type},
             last_login_at {timestamp_type},
+            deleted_at {timestamp_type},
             created_at {timestamp_type} NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at {timestamp_type} NOT NULL DEFAULT CURRENT_TIMESTAMP
         )""",
@@ -295,6 +311,19 @@ def _security_create_statements(id_type: str, timestamp_type: str) -> list[str]:
             restored_at {timestamp_type},
             restore_result TEXT
         )""",
+        f"""CREATE TABLE IF NOT EXISTS document_decisions (
+            id {id_type} PRIMARY KEY,
+            run_id BIGINT NOT NULL,
+            document_key TEXT NOT NULL,
+            decision_type TEXT NOT NULL,
+            selected_ids_json TEXT,
+            status TEXT NOT NULL DEFAULT 'SAVED',
+            justification TEXT,
+            user_id BIGINT REFERENCES app_users(id),
+            created_at {timestamp_type} NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at {timestamp_type} NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(run_id, document_key, decision_type)
+        )""",
     ]
 
 
@@ -303,11 +332,24 @@ POSTGRES_IMPORT_ALTERS = [
     for name, definition in IMPORT_JOB_COLUMNS.items()
 ]
 
+POSTGRES_BATCH_ALTERS = [
+    f"ALTER TABLE import_batches ADD COLUMN IF NOT EXISTS {name} {definition}"
+    for name, definition in IMPORT_BATCH_COLUMNS.items()
+]
+
 INDEX_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS source_records_run_source_idx ON source_records(run_id, source)",
+    "CREATE INDEX IF NOT EXISTS expected_movements_document_idx ON expected_movements(run_id, nf, series, cnpj, direction, center)",
+    "CREATE INDEX IF NOT EXISTS expected_movements_match_idx ON expected_movements(run_id, direction, material_key, doc_date)",
+    "CREATE INDEX IF NOT EXISTS actual_movements_document_idx ON actual_movements(run_id, nf, series)",
+    "CREATE INDEX IF NOT EXISTS reconciliations_run_status_idx ON reconciliations(run_id, status, expected_id, actual_id)",
+    "CREATE INDEX IF NOT EXISTS reconciliations_expected_idx ON reconciliations(expected_id, run_id)",
+    "CREATE INDEX IF NOT EXISTS reconciliations_run_expected_idx ON reconciliations(run_id, expected_id)",
     "CREATE INDEX IF NOT EXISTS import_jobs_status_idx ON import_jobs(status, created_at)",
     "CREATE INDEX IF NOT EXISTS import_jobs_batch_source_idx ON import_jobs(batch_id, source, created_at)",
     "CREATE INDEX IF NOT EXISTS import_jobs_workflow_idx ON import_jobs(workflow_run_id)",
+    "CREATE INDEX IF NOT EXISTS import_jobs_owner_status_idx ON import_jobs(created_by, status, created_at)",
+    "CREATE INDEX IF NOT EXISTS import_batches_owner_status_idx ON import_batches(created_by, status, created_at)",
     "CREATE INDEX IF NOT EXISTS import_job_events_job_idx ON import_job_events(job_id, created_at)",
     "CREATE INDEX IF NOT EXISTS reconciliation_mappings_type_idx ON reconciliation_mappings(mapping_type, status)",
     "CREATE INDEX IF NOT EXISTS app_users_profile_idx ON app_users(profile, active)",
@@ -317,6 +359,11 @@ INDEX_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS login_attempts_identity_idx ON login_attempts(email, ip_address, created_at)",
     "CREATE INDEX IF NOT EXISTS audit_log_created_idx ON audit_log(created_at)",
     "CREATE INDEX IF NOT EXISTS audit_log_user_idx ON audit_log(user_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS document_decisions_document_idx ON document_decisions(run_id, document_key, updated_at)",
+]
+
+POSTGRES_SECURITY_ALTERS = [
+    "ALTER TABLE app_users ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ",
 ]
 
 
@@ -407,6 +454,10 @@ def _ensure_postgres_schema(connection: Any) -> None:
         # ``import_jobs`` existed before batches/cursors were introduced.
         for statement in POSTGRES_IMPORT_ALTERS:
             cursor.execute(statement)
+        for statement in POSTGRES_BATCH_ALTERS:
+            cursor.execute(statement)
+        for statement in POSTGRES_SECURITY_ALTERS:
+            cursor.execute(statement)
         cursor.execute(
             """UPDATE import_jobs SET status='SUPERSEDED',
                error_message=COALESCE(error_message,'Envio legado sem ciclo de importação.'),
@@ -437,6 +488,19 @@ def _ensure_sqlite_schema(connection: sqlite3.Connection) -> None:
     for name, definition in IMPORT_JOB_COLUMNS.items():
         if name not in existing:
             connection.execute(f"ALTER TABLE import_jobs ADD COLUMN {name} {definition}")
+
+    existing_batches = {
+        row[1] for row in connection.execute("PRAGMA table_info(import_batches)").fetchall()
+    }
+    for name, definition in IMPORT_BATCH_COLUMNS.items():
+        if name not in existing_batches:
+            connection.execute(f"ALTER TABLE import_batches ADD COLUMN {name} {definition}")
+
+    user_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(app_users)").fetchall()
+    }
+    if "deleted_at" not in user_columns:
+        connection.execute("ALTER TABLE app_users ADD COLUMN deleted_at TEXT")
 
     connection.execute(
         """UPDATE import_jobs SET status='SUPERSEDED',

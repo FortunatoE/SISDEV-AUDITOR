@@ -20,7 +20,7 @@ const UPLOAD_SOURCES = [
 
 const PAGE_CONFIG = {
   pending: { title: 'Pendências', description: 'Análise lote a lote dos documentos que exigem conferência.', empty: 'Nenhuma pendência encontrada.', columns: ['status', 'situacao_descricao', 'acao_recomendada', 'diagnosis', 'confidence', 'classificacao_automacao', 'nf', 'series', 'doc_date', 'center', 'direcao', 'sap_material', 'lote_sap', 'lote_fabricante', 'quantidade_sap', 'unidade_sap', 'produto_sisdev', 'lote_sisdev', 'quantidade_sisdev'] },
-  regularization: { title: 'Regularizar SISDEV', description: 'Fila operacional com diagnóstico, saldo e dados necessários para regularização.', empty: 'Nenhum documento para regularizar.', columns: ['situacao', 'situacao_descricao', 'status_saldo', 'acao_recomendada', 'numero_nfe', 'serie', 'data_documento', 'cnpj', 'nome_rt', 'art', 'numero_receituario', 'produto', 'volume_embalagem', 'quantidade_embalagem', 'lote', 'cultura', 'diagnostico', 'area_receita', 'ure', 'centro', 'fornecedor', 'status_conciliacao', 'classificacao_automacao'] },
+  regularization: { title: 'Regularizar SISDEV', description: 'Fila inteligente por nota fiscal: resumo primeiro e rastreabilidade sob demanda.', empty: 'Nenhuma nota fiscal para regularizar.', columns: ['prioridade', 'situacao', 'diagnostico_situacao', 'status_saldo', 'acao_recomendada', 'numero_nfe', 'serie', 'data_documento', 'cnpj', 'produto', 'volume_embalagem', 'quantidade_embalagem', 'itens_resumo', '__detail'] },
   analysis: { title: 'Análises', description: 'Resumo das ocorrências por status, diagnóstico e confiança.', empty: 'Nenhuma análise disponível.', columns: ['status', 'diagnosis', 'confidence', 'ocorrencias'] },
   invoices: { title: 'Notas Fiscais', description: 'Notas fiscais SAP consolidadas por documento, centro e direção.', empty: 'Nenhuma nota fiscal encontrada.', columns: ['nf', 'series', 'doc_date', 'center', 'direcao', 'linhas', 'quantidade_sap'] },
   recipes: { title: 'Receitas', description: 'Receitas Agrotis por emissão, produto, responsável técnico e propriedade.', empty: 'Nenhuma receita encontrada.', columns: ['data_emissao', 'numero_receita', 'produto', 'volume_receita', 'unidade', 'emitido_por', 'art', 'diagnostico', 'nome_propriedade', 'cnpj'] },
@@ -35,7 +35,7 @@ const PAGE_CONFIG = {
   reports: { title: 'Relatórios', description: 'Validação consolidada pronta para exportação em CSV ou Excel.', empty: 'Nenhum registro disponível para relatório.' },
   history: { title: 'Histórico', description: 'Fontes e quantidades de linhas utilizadas na execução atual.', empty: 'Nenhum histórico disponível.', columns: ['source', 'source_file', 'linhas'] },
   logs: { title: 'Logs', description: 'Trilha imutável das ações críticas realizadas na plataforma.', empty: 'Nenhuma ação registrada.', columns: ['id', 'data_hora', 'usuario', 'acao', 'modulo', 'entidade', 'identificador', 'resultado', 'justificativa'] },
-  users: { title: 'Usuários', description: 'Usuários, perfis, permissões e escopos autorizados.', empty: 'Nenhum usuário cadastrado.', columns: ['display_name', 'email', 'profile', 'active', 'scopes'] },
+  users: { title: 'Usuários', description: 'Usuários, perfis, permissões e escopos autorizados.', empty: 'Nenhum usuário cadastrado.', columns: ['display_name', 'email', 'profile', 'active', 'scopes', '__user_actions'] },
 };
 
 const LABELS = {
@@ -55,6 +55,11 @@ const LABELS = {
   diagnostico: 'Alvo/Problema', area_receita: 'Área tratada (receita)', numero_nfe: 'Nº da NF',
   serie: 'Série da NF', data_documento: 'Data da NF', volume_embalagem: 'Volume embalagem',
   quantidade_embalagem: 'Qnt. embalagem', fornecedor: 'Fornecedor', status_conciliacao: 'Status da conciliação',
+  prioridade: 'Prioridade', diagnostico_situacao: 'Diagnóstico da situação', itens_resumo: 'Itens/Lotes',
+  situacao: 'Situação',
+  status_lancamento_sap: 'Status de lançamento SAP', status_operacional: 'Status operacional',
+  compatibilidade: 'Compatibilidade', tratamento_status: 'Tratamento',
+  emitente: 'Emitente', tipo_entrada: 'Tipo de entrada',
 };
 
 const state = {
@@ -63,6 +68,7 @@ const state = {
   jobs: loadStoredJobs(),
   pollTimers: new Map(),
   requestSequence: 0,
+  detailSequence: 0,
   reconciling: false,
   reconciliation: null,
   reconciliationPollTimer: 0,
@@ -72,6 +78,8 @@ const state = {
   sort: '',
   order: 'asc',
   appInitialized: false,
+  editingUserId: null,
+  regularizationLotOptions: new Map(),
 };
 
 class ApiError extends Error {
@@ -134,6 +142,9 @@ function displayValue(column, value) {
 }
 
 function qs() {
+  const lotInput = state.current === 'regularization' ? $('lot-filter') : null;
+  const lotSearch = lotInput?.value.trim() || '';
+  const selectedLot = state.regularizationLotOptions.get(lotSearch.toLocaleUpperCase('pt-BR')) || null;
   return new URLSearchParams({
     from: $('from').value,
     to: $('to').value,
@@ -142,6 +153,9 @@ function qs() {
     preferred_rt: $('rt-preference')?.value || '',
     status: $('status-filter')?.value || '',
     nf: $('nf-filter')?.value.trim() || '',
+    product: selectedLot?.product || '',
+    lot: selectedLot?.lot || '',
+    lot_search: selectedLot ? '' : lotSearch,
     page: String(state.page),
     per_page: String(state.perPage),
     sort: state.sort,
@@ -642,6 +656,23 @@ function populateOptions(data) {
   state.optionsLoaded = true;
 }
 
+function populateRegularizationLotOptions(options = []) {
+  const input = $('lot-filter');
+  const list = $('lot-filter-options');
+  const previousValue = input.value;
+  state.regularizationLotOptions = new Map();
+  list.replaceChildren();
+  for (const item of options) {
+    const label = String(item.label || '');
+    state.regularizationLotOptions.set(label.toLocaleUpperCase('pt-BR'), {
+      product: String(item.product || ''),
+      lot: String(item.lot || ''),
+    });
+    list.append(new Option(label, label));
+  }
+  input.value = previousValue;
+}
+
 function resetDashboard() {
   for (const id of ['total', 'correct', 'pending', 'divergent', 'unposted', 'donutValue']) $(id).textContent = '0';
   $('correctPct').textContent = '0% de eficácia';
@@ -795,24 +826,25 @@ function recordStatusClass(value) {
 function renderPageTable(page, data) {
   const config = PAGE_CONFIG[page] || { title: formatLabel(page), description: '', empty: 'Sem registros.' };
   const rows = Array.isArray(data.rows) ? data.rows : [];
-  const preferredColumns = page === 'regularization' && $('direction').value === '1'
-    ? ['situacao', 'numero_nfe', 'serie', 'data_documento', 'cnpj', 'produto', 'volume_embalagem', 'quantidade_embalagem', 'lote', 'centro', 'fornecedor', 'status_conciliacao', 'acao_recomendada']
-    : config.columns || [];
+  const preferredColumns = config.columns || [];
   const columns = page === 'regularization'
-    ? preferredColumns.filter((column) => rows.some((row) => Object.hasOwn(row, column)))
+    ? preferredColumns.filter((column) => column === '__detail' || rows.some((row) => Object.hasOwn(row, column)))
     : page === 'users'
-      ? preferredColumns.filter((column) => rows.some((row) => Object.hasOwn(row, column)))
+      ? preferredColumns.filter((column) => column === '__user_actions' || rows.some((row) => Object.hasOwn(row, column)))
       : orderedColumns(rows, preferredColumns);
+  if (page === 'regularization') populateRegularizationLotOptions(data.filter_options?.product_lots || []);
   if (page === 'pending' && rows.some((row) => row.reconciliation_id)) columns.push('__actions');
   $('page-heading').textContent = config.title;
   $('page-description').textContent = config.description;
+  $('page-view').classList.toggle('regularization-page', page === 'regularization');
   $('page-head').replaceChildren();
   $('page-body').replaceChildren();
 
   if (columns.length) {
     $('page-head').append(create('tr', {}, columns.map((column) => {
-      const button = create('button', { type: 'button', className: 'sort-button', text: column === '__actions' ? 'Tratamento' : formatLabel(column) });
-      if (column === '__actions') return create('th', {}, button);
+       const special = column === '__actions' || column === '__detail' || column === '__user_actions';
+       const button = create('button', { type: 'button', className: 'sort-button', text: column === '__actions' ? 'Tratamento' : column === '__detail' ? 'Detalhe' : column === '__user_actions' ? 'Ações' : formatLabel(column) });
+       if (special) return create('th', {}, button);
       if (state.sort === column) button.textContent += state.order === 'asc' ? ' ↑' : ' ↓';
       button.addEventListener('click', () => {
         state.order = state.sort === column && state.order === 'asc' ? 'desc' : 'asc';
@@ -828,6 +860,18 @@ function renderPageTable(page, data) {
   } else {
     for (const row of rows) {
       const cells = columns.map((column) => {
+        if (column === '__detail') {
+          const button = create('button', { type: 'button', className: 'detail-button', text: 'Ver detalhe' });
+          button.addEventListener('click', () => openRegularizationDetail(row));
+          return create('td', { className: 'detail-action-cell' }, button);
+        }
+        if (column === '__user_actions') {
+          const edit = create('button', { type: 'button', className: 'secondary compact-action', text: 'Editar' });
+          const remove = create('button', { type: 'button', className: 'danger compact-action', text: 'Excluir' });
+          edit.addEventListener('click', () => openUserDialog(row));
+          remove.addEventListener('click', () => deleteExistingUser(row, remove));
+          return create('td', { className: 'user-action-cell' }, [edit, remove]);
+        }
         if (column === '__actions') {
           const button = create('button', { type: 'button', className: 'secondary', text: 'Registrar' });
           button.addEventListener('click', async () => {
@@ -851,15 +895,294 @@ function renderPageTable(page, data) {
           return create('td', {}, button);
         }
         const text = displayValue(column, row[column]);
+        if (column === 'prioridade') {
+          return create('td', {}, create('span', { className: `priority-badge priority-${String(row[column] || '').toLowerCase()}`, text }));
+        }
+        if (column === 'diagnostico_situacao' || column === 'acao_recomendada' || column === 'status_saldo') {
+          return create('td', { className: `regularization-explanation regularization-${column}`, title: text },
+            create('div', { className: 'cell-clamp', text }));
+        }
         if (isStatusColumn(column)) return create('td', {}, create('span', { className: `tag ${recordStatusClass(text)}`.trim(), text }));
         return create('td', { text, title: text.length > 80 ? text : '' });
       });
-      $('page-body').append(create('tr', {}, cells));
+      const rowClass = page === 'regularization' ? `regularization-row priority-${String(row.prioridade || '').toLowerCase()}` : '';
+      $('page-body').append(create('tr', { className: rowClass }, cells));
     }
   }
   renderPageSummary(page, data.summary);
   renderPageActions(page);
   renderPagination(page, data.pagination);
+}
+
+function detailGrid(fields) {
+  return create('div', { className: 'detail-grid' }, fields.map(([label, value]) =>
+    create('div', { className: 'detail-field' }, [
+      create('span', { text: label }), create('strong', { text: safeText(value) }),
+    ]),
+  ));
+}
+
+function detailTable(rows, columns) {
+  const table = create('table', { className: 'detail-table' });
+  table.append(
+    create('thead', {}, create('tr', {}, columns.map(([key, label]) => create('th', { text: label || formatLabel(key) })))),
+    create('tbody', {}, (rows || []).length
+      ? rows.map((row) => create('tr', {}, columns.map(([key]) => create('td', { text: displayValue(key, row?.[key]) }))))
+      : create('tr', {}, create('td', { text: 'Nenhum dado relacionado.', colSpan: columns.length }))),
+  );
+  return create('div', { className: 'table-scroll' }, table);
+}
+
+function traceSection(title, content, open = false, badge = '') {
+  const section = create('details', { className: 'trace-section', open });
+  const summary = create('summary', {}, [create('strong', { text: title })]);
+  if (badge) summary.append(create('span', { className: 'trace-count', text: badge }));
+  section.append(summary, content);
+  return section;
+}
+
+function currentRecipeSelection(detail) {
+  const decision = (detail.decisions || []).find((item) => ['CONFIRM_RECIPE', 'SELECT_RECIPE'].includes(item.decision_type));
+  return new Set((decision?.selected_ids || []).map(String));
+}
+
+function recipeSelectionPanel(detail) {
+  const recipes = detail.recipes || [];
+  if (!recipes.length) return create('p', { className: 'detail-empty', text: 'Nenhuma receita compatível foi localizada em D ou D-1.' });
+  const selected = currentRecipeSelection(detail);
+  const mode = detail.recipe_selection?.mode === 'MULTIPLE' ? 'checkbox' : 'radio';
+  const required = asNumber(detail.recipe_selection?.required);
+  const total = create('strong', { text: '0' });
+  const difference = create('strong', { text: formatNumber(required) });
+  const status = create('span', { className: 'tag warning', text: 'INCOMPATÍVEL' });
+  const cards = create('div', { className: 'recipe-options' });
+  const inputs = [];
+
+  const refreshTotals = () => {
+    const chosen = inputs.filter((input) => input.checked);
+    const amount = chosen.reduce((sum, input) => sum + asNumber(input.dataset.quantity), 0);
+    const delta = required - amount;
+    total.textContent = formatNumber(amount);
+    difference.textContent = formatNumber(delta);
+    const compatible = Math.abs(delta) <= Math.max(.001, required * .000001);
+    status.textContent = compatible ? 'COMPATÍVEL' : delta > 0 ? 'FALTA VOLUME' : 'EXCEDE VOLUME';
+    status.className = `tag ${compatible ? 'completed' : 'warning'}`;
+  };
+
+  for (const recipe of recipes) {
+    const input = create('input', {
+      type: mode, name: `recipe-${detail.document_id}`, value: String(recipe.recipe_id),
+      checked: selected.has(String(recipe.recipe_id)),
+      dataset: { quantity: String(recipe.quantidade_receita || 0) },
+      attrs: { 'aria-label': `Selecionar receita ${safeText(recipe.numero_receita)}` },
+    });
+    input.addEventListener('change', refreshTotals);
+    inputs.push(input);
+    const heading = create('div', { className: 'recipe-option-heading' }, [
+      input,
+      create('strong', { text: `Receita ${safeText(recipe.numero_receita)}` }),
+      create('span', { className: 'compatibility', text: `${formatNumber(recipe.compatibilidade)}%` }),
+    ]);
+    if (recipe.mais_compativel) heading.append(create('span', { className: 'best-match', text: 'Mais compatível' }));
+    cards.append(create('article', { className: 'recipe-option' }, [
+      heading,
+      detailGrid([
+        ['Produto', recipe.produto], ['Material', recipe.material], ['Lote', recipe.lote],
+        ['Volume relacionado', `${formatNumber(recipe.quantidade_receita)} ${safeText(recipe.unidade_receita)}`],
+        ['Cultura', recipe.cultura], ['Alvo/Problema', recipe.diagnostico],
+        ['Área tratada', recipe.area_receita], ['Agrônomo/Técnico', recipe.nome_rt],
+        ['ART/TRT', recipe.art], ['URE', recipe.ure], ['Data', displayValue('data_emissao', recipe.data_emissao)],
+        ['Motivos', (recipe.compatibilidade_motivos || []).join(', ')],
+      ]),
+    ]));
+  }
+  const justification = create('textarea', { className: 'decision-justification', attrs: { placeholder: 'Justificativa ou observação da decisão (opcional)', rows: '3' } });
+  const message = create('span', { className: 'decision-message', attrs: { role: 'status' } });
+  const selectedIds = () => inputs.filter((input) => input.checked).map((input) => input.value);
+  const save = create('button', { type: 'button', className: 'secondary', text: 'Salvar seleção' });
+  const confirm = create('button', { type: 'button', text: 'Confirmar receita' });
+  const reject = create('button', { type: 'button', className: 'danger-secondary', text: 'Rejeitar opções' });
+  const act = async (type, button) => {
+    button.disabled = true;
+    try {
+      await saveRegularizationDecision(detail.document_id, type, selectedIds(), '', justification.value);
+      message.textContent = type === 'CONFIRM_RECIPE' ? 'Receita confirmada e auditada.' : type === 'REJECT_RECIPE' ? 'Rejeição registrada.' : 'Seleção salva.';
+    } catch (error) { message.textContent = error.message; }
+    finally { button.disabled = false; }
+  };
+  save.addEventListener('click', () => act('SELECT_RECIPE', save));
+  confirm.addEventListener('click', () => act('CONFIRM_RECIPE', confirm));
+  reject.addEventListener('click', () => act('REJECT_RECIPE', reject));
+  refreshTotals();
+  return create('div', { className: 'recipe-selection' }, [
+    create('p', { className: 'selection-mode', text: mode === 'checkbox' ? 'Seleção múltipla permitida' : 'Seleção única' }),
+    cards,
+    create('div', { className: 'selection-totals' }, [
+      create('span', {}, ['Necessário: ', create('strong', { text: formatNumber(required) })]),
+      create('span', {}, ['Selecionado: ', total]), create('span', {}, ['Diferença: ', difference]), status,
+    ]),
+    justification,
+    create('div', { className: 'decision-actions' }, [save, reject, confirm]), message,
+  ]);
+}
+
+async function saveRegularizationDecision(documentId, decisionType, selectedIds = [], movementId = '', justification = '') {
+  return requestJson(`/api/regularization/${encodeURIComponent(documentId)}/decisions`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ decision_type: decisionType, selected_ids: selectedIds, movement_id: movementId, justification }),
+  }, 30_000);
+}
+
+function returnChainPanel(detail) {
+  const chain = detail.return_chain;
+  if (!chain) return create('div', { className: 'return-chain' }, [
+    create('p', { className: 'detail-empty', text: 'Entrada de fornecedor: não exige receita nem estorno de saída.' }),
+    detailGrid([
+      ['Emitente', detail.document?.emitente], ['NF de entrada', detail.document?.numero_nfe],
+      ['Tipo de entrada', detail.document?.tipo_entrada], ['Itens/Lotes', detail.document?.itens_resumo],
+    ]),
+  ]);
+  const originals = chain.originals || (chain.original ? [chain.original] : []);
+  const movements = chain.movements || (chain.movement ? [chain.movement] : []);
+  const selectedDecision = (detail.decisions || []).find((item) => item.decision_type === 'CONFIRM_MOVEMENT');
+  const selected = new Set((selectedDecision?.selected_ids || []).map(String));
+  const content = create('div', { className: 'return-chain' }, [
+    detailGrid([
+      ['NF de retorno', detail.document?.numero_nfe], ['Emitente', detail.document?.emitente],
+      ['Quantidade retornada', chain.required_quantity], ['Quantidade localizada nas saídas', chain.matched_quantity],
+      ['Diferença ainda não localizada', chain.remaining_quantity], ['Saídas do lote', originals.length],
+      ['Movimentações SISDEV localizadas', movements.length], ['Status', chain.status],
+    ]),
+  ]);
+  if (originals.length) {
+    content.append(create('h3', { text: 'Notas de saída relacionadas ao lote' }));
+    content.append(detailTable(originals, [
+      ['nf', 'NF de saída'], ['series', 'Série'], ['doc_date', 'Data'], ['cnpj', 'CNPJ'],
+      ['center', 'Centro'], ['sap_material', 'Material'], ['manufacturer_lot', 'Lote fabricante'],
+      ['quantity', 'Quantidade'], ['unit', 'Unidade'], ['movement_id', 'Movimentação SISDEV'],
+      ['movement_status', 'Situação SISDEV'],
+    ]));
+  }
+  if (movements.length) {
+    const inputs = [];
+    const choices = create('div', { className: 'movement-options' });
+    for (const movement of movements) {
+      const input = create('input', {
+        type: 'checkbox', value: String(movement.id), checked: selected.has(String(movement.id)),
+        attrs: { 'aria-label': `Selecionar movimentação ${movement.id}` },
+      });
+      inputs.push(input);
+      choices.append(create('label', { className: 'movement-option' }, [
+        input,
+        create('span', { text: `Movimentação #${movement.id} · NF ${safeText(movement.nf)} · ${safeText(movement.product)} · lote ${safeText(movement.lot)} · ${formatNumber(movement.quantidade_total)} ${safeText(movement.unit)}` }),
+      ]));
+    }
+    const note = create('textarea', { className: 'decision-justification', attrs: { placeholder: 'Justificativa da confirmação/rejeição', rows: '3' } });
+    const message = create('span', { className: 'decision-message', attrs: { role: 'status' } });
+    const confirm = create('button', { type: 'button', text: 'Confirmar movimentações selecionadas' });
+    const reject = create('button', { type: 'button', className: 'danger-secondary', text: 'Rejeitar seleção' });
+    const act = async (type, button) => {
+      const selectedIds = inputs.filter((input) => input.checked).map((input) => input.value);
+      if (!selectedIds.length) {
+        message.textContent = 'Selecione ao menos uma movimentação.';
+        return;
+      }
+      button.disabled = true;
+      try {
+        await saveRegularizationDecision(detail.document_id, type, selectedIds, '', note.value);
+        message.textContent = type === 'CONFIRM_MOVEMENT' ? 'Movimentações confirmadas e auditadas.' : 'Rejeição registrada.';
+      } catch (error) { message.textContent = error.message; }
+      finally { button.disabled = false; }
+    };
+    confirm.addEventListener('click', () => act('CONFIRM_MOVEMENT', confirm));
+    reject.addEventListener('click', () => act('REJECT_MOVEMENT', reject));
+    content.append(create('h3', { text: 'Movimentações disponíveis para estorno' }), choices, note,
+      create('div', { className: 'decision-actions' }, [reject, confirm]), message);
+  } else {
+    content.append(create('p', { className: 'detail-empty', text: 'As notas de saída foram pesquisadas, mas nenhuma movimentação SISDEV vinculada está disponível para estorno.' }));
+  }
+  return content;
+}
+
+function renderRegularizationDetail(detail) {
+  const document = detail.document || {};
+  const isEntry = document.direcao === 'Entrada';
+  $('regularization-detail-title').textContent = `NF ${safeText(document.numero_nfe)} · Série ${safeText(document.serie)}`;
+  const content = $('regularization-detail-content');
+  const sections = [
+    create('section', { className: 'detail-hero' }, [
+      create('div', { className: 'detail-status-line' }, [
+        create('span', { className: `priority-badge priority-${String(document.prioridade || '').toLowerCase()}`, text: `Prioridade ${safeText(document.prioridade)}` }),
+        create('span', { className: `tag ${recordStatusClass(document.situacao)}`, text: safeText(document.situacao) }),
+      ]),
+      create('p', { className: 'detail-diagnosis', text: document.diagnostico_situacao }),
+      create('p', { className: 'detail-action', text: `Ação recomendada: ${safeText(document.acao_recomendada)}` }),
+      detailGrid([
+        ['Data', displayValue('data_documento', document.data_documento)], ['CNPJ', document.cnpj],
+        ['Centro', document.centro], ['Direção', document.direcao], ['Itens/Lotes', document.itens_resumo],
+        ['Emitente', document.emitente], ['Tipo de entrada', document.tipo_entrada],
+        ['Status saldo', document.status_saldo], ['Status SAP', document.status_lancamento_sap],
+        ['Status operacional', document.status_operacional], ['Status conciliação', document.status_conciliacao],
+      ]),
+    ]),
+    traceSection('Produtos e lotes', detailTable(detail.items, [
+      ['produto', 'Produto'], ['lote', 'Lote'], ['quantidade_sap', 'Quantidade'], ['unidade_sap', 'Unidade'],
+      ['volume_embalagem', 'Volume embalagem'], ['quantidade_embalagem', 'Qnt. embalagem'],
+    ]), true, `${(detail.items || []).length} itens`),
+  ];
+  if (!isEntry) sections.push(
+    traceSection('Receitas possíveis', recipeSelectionPanel(detail), true, `${(detail.recipes || []).length}`),
+  );
+  sections.push(
+    traceSection('SAP', detailTable(detail.sap, [
+      ['numero_nfe', 'NF'], ['serie', 'Série'], ['data_documento', 'Data'], ['produto', 'Material'],
+      ['lote_sap', 'Lote SAP'], ['lote', 'Lote fabricante'], ['quantidade_sap', 'Quantidade'],
+      ['status_lancamento_sap', 'Status lançamento'],
+    ]), false, `${(detail.sap || []).length}`),
+  );
+  if (!isEntry) sections.push(
+    traceSection('SISDEV', detailTable(detail.sisdev, [
+      ['id', 'Movimentação'], ['nf', 'NF'], ['movement_date', 'Data'], ['product', 'Produto'],
+      ['lot', 'Lote'], ['quantity', 'Embalagens'], ['volume', 'Volume'], ['status', 'Situação'],
+    ]), false, `${(detail.sisdev || []).length}`),
+  );
+  sections.push(
+    traceSection('Conciliação', detailTable(detail.reconciliation, [
+      ['status', 'Status'], ['diagnosis', 'Diagnóstico'], ['confidence', 'Confiança'], ['details', 'Regras/detalhes'],
+    ]), false, `${(detail.reconciliation || []).length}`),
+  );
+  if (!isEntry) sections.push(
+    traceSection('Saldo', detailTable(detail.balance, [
+      ['produto', 'Produto'], ['lote', 'Lote'], ['saldo_disponivel', 'Saldo atual'],
+      ['saldo_necessario', 'Necessário'], ['saldo_apos_lancamento', 'Após operação'],
+      ['falta_saldo', 'Diferença'], ['status_saldo_codigo', 'Status'],
+    ]), false, `${(detail.balance || []).length}`),
+  );
+  if (isEntry) sections.push(
+    traceSection(document.tipo_entrada === 'TRANSFERENCIA_RETORNO' ? 'Retorno ao armazém / estorno' : 'Entrada de fornecedor', returnChainPanel(detail), true),
+  );
+  sections.push(
+    traceSection('Histórico e auditoria', detailTable(detail.history, [
+      ['data_hora', 'Data/hora'], ['usuario', 'Usuário'], ['action', 'Ação'], ['result', 'Resultado'], ['justificativa', 'Justificativa'],
+    ]), false, `${(detail.history || []).length}`),
+  );
+  content.replaceChildren(...sections);
+}
+
+async function openRegularizationDetail(row) {
+  const dialog = $('regularization-detail-dialog');
+  const requestId = ++state.detailSequence;
+  $('regularization-detail-title').textContent = `NF ${safeText(row.numero_nfe)}`;
+  $('regularization-detail-content').replaceChildren(create('p', { className: 'detail-loading', text: 'Carregando a árvore de rastreabilidade desta NF...' }));
+  if (!dialog.open) dialog.showModal();
+  try {
+    const detail = await requestJson(`/api/regularization/${encodeURIComponent(row.document_id)}?${qs()}`, { method: 'GET' }, 45_000);
+    if (requestId !== state.detailSequence || !dialog.open) return;
+    renderRegularizationDetail(detail);
+  } catch (error) {
+    if (requestId !== state.detailSequence) return;
+    $('regularization-detail-content').replaceChildren(create('p', { className: 'table-error', text: error.message }));
+  }
 }
 
 function renderPagination(page, pagination) {
@@ -942,17 +1265,85 @@ function renderPageActions(page) {
   actions.replaceChildren();
   addExportButtons(actions, page);
   if (page === 'regularization') {
-    const entry = create('button', { type: 'button', className: 'secondary', text: 'Regularizar entrada' });
-    const exit = create('button', { type: 'button', className: 'secondary', text: 'Regularizar saída' });
-    entry.addEventListener('click', () => { $('direction').value = '1'; state.page = 1; loadPage(page); });
-    exit.addEventListener('click', () => { $('direction').value = '2'; state.page = 1; loadPage(page); });
-    actions.prepend(entry, exit);
+    const sortLabel = create('label', { className: 'queue-sort' }, create('span', { text: 'Ordenar por' }));
+    const sortSelect = create('select', { attrs: { 'aria-label': 'Ordenar fila por' } });
+    for (const [value, label] of [
+      ['prioridade', 'Prioridade'], ['data', 'Data'], ['nf', 'NF'], ['status', 'Status'],
+      ['compatibilidade', 'Compatibilidade'], ['centro', 'Centro'],
+    ]) sortSelect.append(new Option(label, value, false, (state.sort || 'prioridade') === value));
+    sortSelect.addEventListener('change', () => { state.sort = sortSelect.value; state.page = 1; loadPage(page); });
+    sortLabel.append(sortSelect);
+    const currentDirection = $('direction').value;
+    const entryActive = currentDirection === '1';
+    const exitActive = currentDirection === '2';
+    const entry = create('button', {
+      type: 'button',
+      className: `secondary operation-toggle${entryActive ? ' active' : ''}`,
+      text: 'Regularizar entrada',
+      attrs: { 'aria-pressed': String(entryActive) },
+    });
+    const exit = create('button', {
+      type: 'button',
+      className: `secondary operation-toggle${exitActive ? ' active' : ''}`,
+      text: 'Regularizar saída',
+      attrs: { 'aria-pressed': String(exitActive) },
+    });
+    const toggleDirection = (value) => {
+      $('direction').value = $('direction').value === value ? '' : value;
+      state.page = 1;
+      loadPage(page);
+    };
+    entry.addEventListener('click', () => toggleDirection('1'));
+    exit.addEventListener('click', () => toggleDirection('2'));
+    actions.prepend(sortLabel, entry, exit);
     addRtPreference(actions);
   }
   if (page === 'users') {
     const add = create('button', { type: 'button', text: 'Novo usuário' });
-    add.addEventListener('click', () => $('user-dialog').showModal());
+    add.addEventListener('click', () => openUserDialog());
     actions.append(add);
+  }
+}
+
+function openUserDialog(user = null) {
+  state.editingUserId = user?.id ?? null;
+  $('user-form').reset();
+  $('user-dialog-title').textContent = user ? 'Editar usuário' : 'Novo usuário';
+  $('user-submit').textContent = user ? 'Salvar alterações' : 'Criar usuário';
+  $('user-password-label').textContent = user ? 'Nova senha (opcional)' : 'Senha temporária';
+  $('user-password').required = !user;
+  $('user-form-message').textContent = '';
+  $('user-name').value = user?.display_name || '';
+  $('user-email').value = user?.email || '';
+  $('user-profile').value = user?.profile || 'GESTOR';
+  $('user-active').checked = user ? Boolean(user.active) : true;
+  $('user-centers').value = (user?.scopes || [])
+    .filter((scope) => scope.scope_type === 'CENTER')
+    .map((scope) => scope.scope_value)
+    .join(', ');
+  $('user-dialog').showModal();
+}
+
+async function deleteExistingUser(user, button) {
+  if (Number(user.id) === Number(state.auth?.user?.id)) {
+    $('notice').hidden = false;
+    $('notice').textContent = 'Não é possível excluir o próprio usuário.';
+    return;
+  }
+  if (!window.confirm(`Excluir o acesso de ${user.display_name}? A trilha de auditoria será preservada.`)) return;
+  button.disabled = true;
+  try {
+    await requestJson(`/api/auth/users/${user.id}`, {
+      method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ justification: 'Exclusão solicitada no painel administrativo.' }),
+    }, 20_000);
+    $('notice').hidden = false;
+    $('notice').textContent = `Usuário ${user.display_name} excluído com segurança.`;
+    await loadPage('users');
+  } catch (error) {
+    $('notice').hidden = false;
+    $('notice').textContent = error.message;
+    button.disabled = false;
   }
 }
 
@@ -989,14 +1380,16 @@ function updateViewVisibility(page) {
 
 function configureFilters(page) {
   const operational = ['pending', 'regularization'].includes(page);
+  $('direction-filter-label').hidden = page === 'regularization';
   $('status-filter-label').hidden = !operational;
   $('nf-filter-label').hidden = !operational;
+  $('lot-filter-label').hidden = page !== 'regularization';
   const select = $('status-filter');
   const selected = select.value;
   const options = page === 'pending'
     ? ['PENDENTE', 'REGULARIZADO', 'DIVERGENTE', 'SEM_RECEITA', 'RECEITAS_MULTIPLAS', 'SEM_SALDO', 'MATERIAL_NAO_MAPEADO', 'LOTE_NAO_MAPEADO', 'ERRO_CONCILIACAO']
     : page === 'regularization'
-      ? ['PENDENTE', 'OK', 'SEM_RECEITA', 'RECEITAS_MULTIPLAS', 'SALDO_PARCIAL', 'SEM_SALDO', 'MATERIAL_NAO_MAPEADO', 'LOTE_NAO_MAPEADO', 'DIVERGENTE', 'ERRO_CONCILIACAO']
+      ? ['PENDENTE', 'EM_ANALISE', 'TRATADO', 'ENTRADA_FORNECEDOR', 'OK', 'SEM_RECEITA', 'RECEITAS_MULTIPLAS', 'SALDO_PARCIAL', 'SEM_SALDO', 'MATERIAL_NAO_MAPEADO', 'LOTE_NAO_MAPEADO', 'MOVIMENTACAO_NAO_LOCALIZADA', 'PENDENTE_ESTORNO', 'ESTORNO_PARCIAL', 'ESTORNO_COMPLETO', 'DIVERGENTE', 'ERRO_CONCILIACAO']
       : [];
   select.replaceChildren(new Option('Todos', ''));
   for (const value of options) select.append(new Option(formatLabel(value), value));
@@ -1107,16 +1500,20 @@ function installAuthEvents() {
     event.preventDefault();
     const centers = $('user-centers').value.split(',').map((value) => value.trim()).filter(Boolean);
     try {
-      await requestJson('/api/auth/users', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const payload = {
           display_name: $('user-name').value, email: $('user-email').value,
-          password: $('user-password').value, profile: $('user-profile').value,
+          profile: $('user-profile').value, active: $('user-active').checked,
           scopes: centers.map((scope_value) => ({ scope_type: 'CENTER', scope_value })),
-        }),
+      };
+      if ($('user-password').value) payload.password = $('user-password').value;
+      const editing = state.editingUserId !== null;
+      await requestJson(editing ? `/api/auth/users/${state.editingUserId}` : '/api/auth/users', {
+        method: editing ? 'PATCH' : 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
       }, 20_000);
       $('user-dialog').close();
       $('user-form').reset();
+      state.editingUserId = null;
       if (state.current === 'users') await loadPage('users');
     } catch (error) {
       $('user-form-message').textContent = error.message;
@@ -1142,6 +1539,11 @@ async function refreshCurrentView() {
 }
 
 function installEvents() {
+  $('close-regularization-detail').addEventListener('click', () => {
+    state.detailSequence += 1;
+    $('regularization-detail-dialog').close();
+  });
+  $('regularization-detail-dialog').addEventListener('cancel', () => { state.detailSequence += 1; });
   for (const link of document.querySelectorAll('nav a[data-page]')) {
     link.addEventListener('click', (event) => {
       event.preventDefault();
@@ -1153,7 +1555,7 @@ function installEvents() {
     return state.current === 'dashboard' ? loadDashboard() : loadPage(state.current);
   });
   $('clear-filters').addEventListener('click', () => {
-    for (const id of ['from', 'to', 'center', 'direction', 'status-filter', 'nf-filter']) $(id).value = '';
+    for (const id of ['from', 'to', 'center', 'direction', 'status-filter', 'nf-filter', 'lot-filter']) $(id).value = '';
     state.page = 1;
     return state.current === 'dashboard' ? loadDashboard() : loadPage(state.current);
   });

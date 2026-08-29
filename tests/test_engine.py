@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from openpyxl import Workbook
+
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -14,6 +16,24 @@ from auditor import database, engine  # noqa: E402
 
 
 class EngineUnitTests(unittest.TestCase):
+    def test_ooxml_workbook_with_legacy_xls_name_is_read_by_content(self):
+        columns = [
+            "Número do receituário", "Data de Emissão", "Produto", "Dose",
+            "Tipo de Dosagem", "Nome RT",
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ReceitasEmitidas.xls"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(columns)
+            sheet.append(["R-1", "28/08/2026", "PRODUTO A", 60, "mL/ha", "RT TESTE"])
+            workbook.save(path)
+
+            rows = engine._read_source("agrotis_recipe", path)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][1]["Número do receituário"], "R-1")
+
     def test_dates_are_day_first_and_dose_is_converted_before_area(self):
         self.assertEqual(engine.iso_date("04/12/2025 21:50"), "2025-12-04")
         self.assertEqual(engine._normalized_dose(60, "mL/ha"), (0.06, "L/ha"))
@@ -26,6 +46,55 @@ class EngineUnitTests(unittest.TestCase):
         self.assertEqual(engine._expected_direction("sap_exit_current", "Entrada"), "1")
         self.assertEqual(engine._series(1.0), "1")
         self.assertEqual(engine._series("001.0"), "1")
+
+    def test_entry_origin_distinguishes_internal_transfer_from_supplier(self):
+        internal = engine._entry_origin({
+            "Nome": "BOA ESPERANCA AGROPECUARIA LTDA",
+            "CNPJ": "01.722.958/0012-01",
+        })
+        supplier = engine._entry_origin({
+            "Nome": "SYNGENTA PROTECAO DE CULTIVOS LTDA",
+            "CNPJ": "60.744.463/0041-87",
+        })
+        self.assertEqual(internal["tipo_entrada"], "TRANSFERENCIA_RETORNO")
+        self.assertEqual(supplier["tipo_entrada"], "ENTRADA_FORNECEDOR")
+
+    def test_return_chain_lists_all_previous_exits_for_the_lot(self):
+        exits = [
+            {
+                "id": 10, "nf": "201", "series": "1", "doc_date": "2025-12-03",
+                "cnpj": "01722958001201", "center": "0714", "sap_material": "PRODUTO A",
+                "material_key": "PRODUTO A", "lot": "LOTE-A", "manufacturer_lot": "FAB-A",
+                "quantity": 15.0, "unit": "L", "actual_id": 110,
+            },
+            {
+                "id": 11, "nf": "202", "series": "1", "doc_date": "2025-12-02",
+                "cnpj": "01722958001201", "center": "0714", "sap_material": "PRODUTO A",
+                "material_key": "PRODUTO A", "lot": "LOTE-A", "manufacturer_lot": "FAB-A",
+                "quantity": 25.0, "unit": "L", "actual_id": 111,
+            },
+            {
+                "id": 12, "nf": "203", "series": "1", "doc_date": "2025-12-01",
+                "cnpj": "01722958001201", "center": "0714", "sap_material": "PRODUTO A",
+                "material_key": "PRODUTO A", "lot": "OUTRO", "manufacturer_lot": "OUTRO",
+                "quantity": 99.0, "unit": "L", "actual_id": 112,
+            },
+        ]
+        actuals = {
+            110: {"id": 110, "nf": "201", "product": "PRODUTO A", "lot": "FAB-A", "quantity": 1, "volume": 15, "unit": "L"},
+            111: {"id": 111, "nf": "202", "product": "PRODUTO A", "lot": "FAB-A", "quantity": 1, "volume": 25, "unit": "L"},
+            112: {"id": 112, "nf": "203", "product": "PRODUTO A", "lot": "OUTRO", "quantity": 1, "volume": 99, "unit": "L"},
+        }
+        chain = engine._return_chain_for_item(None, 1, {
+            "direction": "1", "material_key": "PRODUTO A", "doc_date": "2025-12-04",
+            "nf": "300", "manufacturer_lot": "FAB-A", "lot": "LOTE-A",
+            "quantity": 40.0, "unit": "L", "cnpj": "01722958001201",
+        }, {"exits_by_material": {"PRODUTO A": exits}, "actuals": actuals})
+        self.assertEqual(chain["status"], "PENDENTE_ESTORNO")
+        self.assertEqual([item["nf"] for item in chain["originals"]], ["201", "202"])
+        self.assertEqual({item["id"] for item in chain["movements"]}, {110, 111})
+        self.assertEqual(chain["matched_quantity"], 40.0)
+        self.assertEqual(chain["remaining_quantity"], 0.0)
 
     def test_recipe_fields_are_read_by_column_name_not_position(self):
         raw = {
@@ -162,6 +231,146 @@ class EngineDatabaseTests(unittest.TestCase):
                 "SELECT status FROM reconciliations WHERE expected_id IS NOT NULL"
             ).fetchone()[0]
         self.assertEqual(status, "DIVERGENCIA_LOTE_FABRICANTE")
+
+    def test_regularization_queue_groups_items_by_document_and_loads_detail_on_demand(self):
+        first = self._sap_row(lot="LOTE-A")
+        second = dict(self._sap_row(lot="LOTE-B"))
+        second["Texto breve material"] = "PRODUTO B"
+        second["Lote Fabricante"] = "FABRICANTE-B"
+        run_id = engine.create_import_run()
+        with mock.patch.object(
+            engine, "_read_source", return_value=[(2, first), (3, second)],
+        ):
+            engine.import_source(run_id, "sap_exit_current", self._path("exit.xlsx"))
+        engine.reconcile_run(run_id, require_complete=False)
+
+        queue = engine.page_records_v2("regularization", {"page": 1, "per_page": 25})
+        self.assertEqual(queue["pagination"]["total"], 1)
+        self.assertEqual(len(queue["rows"]), 1)
+        document = queue["rows"][0]
+        self.assertEqual(document["itens_count"], 2)
+        self.assertEqual(document["lotes_count"], 2)
+        self.assertNotIn("expected_id", document)
+
+        pending = engine.page_records_v2(
+            "regularization", {"page": 1, "per_page": 25, "status": "PENDENTE"},
+        )
+        self.assertEqual(pending["pagination"]["total"], 1)
+
+        entries = engine.page_records_v2(
+            "regularization", {"page": 1, "per_page": 25, "direction": "1"},
+        )
+        exits = engine.page_records_v2(
+            "regularization", {"page": 1, "per_page": 25, "direction": "2"},
+        )
+        self.assertEqual(entries["pagination"]["total"], 0)
+        self.assertEqual(exits["pagination"]["total"], 1)
+
+        detail = engine.regularization_document_detail(document["document_id"])
+        self.assertIsNotNone(detail)
+        self.assertEqual(len(detail["items"]), 2)
+        self.assertEqual({item["produto"] for item in detail["items"]}, {"PRODUTO A", "PRODUTO B"})
+
+    def test_regularization_product_lot_filter_returns_all_related_notes(self):
+        first = self._sap_row(lot="LOTE-A")
+        first.update({
+            "Número de nota fiscal eletrônica": 101,
+            "Texto breve material": "PRODUTO A",
+            "Lote Fabricante": "FAB-A",
+        })
+        second = dict(first)
+        second["Número de nota fiscal eletrônica"] = 102
+        third = self._sap_row(lot="LOTE-B")
+        third.update({
+            "Número de nota fiscal eletrônica": 103,
+            "Texto breve material": "PRODUTO B",
+            "Lote Fabricante": "FAB-B",
+        })
+        run_id = engine.create_import_run()
+        with mock.patch.object(
+            engine, "_read_source", return_value=[(2, first), (3, second), (4, third)],
+        ):
+            engine.import_source(run_id, "sap_exit_current", self._path("exit.xlsx"))
+        engine.reconcile_run(run_id, require_complete=False)
+
+        result = engine.page_records_v2(
+            "regularization",
+            {"page": 1, "per_page": 25, "product": "PRODUTO A", "lot": "FAB-A"},
+        )
+
+        self.assertEqual(result["pagination"]["total"], 2)
+        self.assertEqual({row["numero_nfe"] for row in result["rows"]}, {"000000101", "000000102"})
+        labels = {item["label"] for item in result["filter_options"]["product_lots"]}
+        self.assertIn("PRODUTO A & FABA", labels)
+        self.assertIn("PRODUTO B & FABB", labels)
+
+        typed = engine.page_records_v2(
+            "regularization", {"page": 1, "per_page": 25, "lot_search": "fab-a"},
+        )
+        self.assertEqual(typed["pagination"]["total"], 2)
+
+    def test_regularization_lot_filter_opens_the_complete_document(self):
+        first = self._sap_row(lot="LOTE-A")
+        first.update({
+            "Número de nota fiscal eletrônica": 101,
+            "Texto breve material": "PRODUTO A",
+            "Lote Fabricante": "FAB-A",
+        })
+        second = self._sap_row(lot="LOTE-B")
+        second.update({
+            "Número de nota fiscal eletrônica": 101,
+            "Texto breve material": "PRODUTO B",
+            "Lote Fabricante": "FAB-B",
+        })
+        other_document = dict(first)
+        other_document["Número de nota fiscal eletrônica"] = 102
+        run_id = engine.create_import_run()
+        with mock.patch.object(
+            engine, "_read_source", return_value=[(2, first), (3, second), (4, other_document)],
+        ):
+            engine.import_source(run_id, "sap_exit_current", self._path("exit.xlsx"))
+        engine.reconcile_run(run_id, require_complete=False)
+
+        filters = {"page": 1, "per_page": 25, "product": "PRODUTO A", "lot": "FAB-A"}
+        queue = engine.page_records_v2("regularization", filters)
+        document = next(row for row in queue["rows"] if row["numero_nfe"] == "000000101")
+        detail = engine.regularization_document_detail(document["document_id"], filters)
+
+        self.assertIsNotNone(detail)
+        self.assertEqual(len(detail["items"]), 2)
+        self.assertEqual({item["produto"] for item in detail["items"]}, {"PRODUTO A", "PRODUTO B"})
+        self.assertEqual({item["lote"] for item in detail["items"]}, {"FABA", "FABB"})
+
+    def test_supplier_entry_has_no_recipe_or_return_chain(self):
+        entry = self._sap_row()
+        entry.update({
+            "Nome": "SYNGENTA PROTECAO DE CULTIVOS LTDA",
+            "CNPJ": "60.744.463/0041-87",
+        })
+        run_id = engine.create_import_run()
+        with mock.patch.object(engine, "_read_source", return_value=[(2, entry)]):
+            engine.import_source(run_id, "sap_entry_current", self._path("entry.xlsx"))
+        engine.reconcile_run(run_id, require_complete=False)
+
+        queue = engine.page_records_v2(
+            "regularization", {"page": 1, "per_page": 25, "direction": "1"},
+        )
+        self.assertEqual(queue["pagination"]["total"], 1)
+        document = queue["rows"][0]
+        self.assertEqual(document["situacao"], "ENTRADA_FORNECEDOR")
+        self.assertEqual(document["tipo_entrada"], "ENTRADA_FORNECEDOR")
+        self.assertEqual(document["emitente"], "SYNGENTA PROTECAO DE CULTIVOS LTDA")
+
+        detail = engine.regularization_document_detail(document["document_id"])
+        self.assertEqual(detail["recipes"], [])
+        self.assertIsNone(detail["return_chain"])
+        self.assertNotIn("numero_receita", detail["items"][0])
+
+    def test_sap_launch_status_uses_known_icons_without_guessing(self):
+        self.assertEqual(engine._sap_launch_status({"Ícone": "@A0@"}), "LANCADO_MANUALMENTE")
+        self.assertEqual(engine._sap_launch_status({"Ícone": "@0V@"}), "LANCADO_AUTOMATICAMENTE")
+        self.assertEqual(engine._sap_launch_status({"Ícone": "@1A@"}), "DOCUMENTO_PENDENTE")
+        self.assertEqual(engine._sap_launch_status({"Ícone": "desconhecido"}), "NAO_INFORMADO")
 
 
 if __name__ == "__main__":

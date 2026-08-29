@@ -107,7 +107,14 @@ def _xlsx(columns, rows):
     return output.getvalue()
 
 def run():
+    if os.getenv("SISDEV_ENABLE_INSECURE_LEGACY_SERVER") != "1":
+        raise RuntimeError(
+            "O servidor HTTP legado foi desativado. Execute `python src/main.py` "
+            "para usar a API Flask autenticada."
+        )
     host = os.getenv("SISDEV_HOST", "127.0.0.1")
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        raise RuntimeError("O servidor legado só pode escutar na interface local.")
     port = int(os.getenv("PORT", "8765"))
     print(f"SISDEV AUDITOR em http://{host}:{port}")
     ThreadingHTTPServer((host, port), Handler).serve_forever()

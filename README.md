@@ -4,7 +4,9 @@ Aplicação web para auditoria, conciliação e preparação operacional de lan�
 
 > O SISDEV AUDITOR não realiza lançamentos automáticos no SISDEV.
 
-## Versão  — 27 agosto de 2026
+![SISDEV Auditor — funcionalidades e segurança](docs/linkedin/sisdev-auditor-funcionalidades-seguranca.png)
+
+## Versão — 29 agosto de 2026
 
 Esta versão consolida a evolução da aplicação para uma plataforma protegida de análise, auditoria e orientação operacional. Está publicada em [sisdev-auditor.vercel.app](https://sisdev-auditor.vercel.app/).
 
@@ -19,7 +21,7 @@ Principais melhorias entregues:
 - filtros combinados por período, centro, operação, status e NF-e;
 - exportação filtrada em CSV e XLSX com proteção contra CSV Injection;
 - Pendências com situação estruturada, diagnóstico, ação recomendada e confiança;
-- Regularizar SISDEV separado entre entrada e saída, com dados operacionais completos;
+- Regularizar SISDEV como fila inteligente consolidada por NF, com dados operacionais completos sob demanda;
 - cálculo inteligente do saldo: `OK`, `SALDO_PARCIAL` e `SEM_SALDO`;
 - trilha de auditoria para autenticação, importação, exportação, cadastros, mapeamentos e tratamento de pendências;
 - uploads validados e arquivos originais privados no Vercel Blob;
@@ -27,7 +29,21 @@ Principais melhorias entregues:
 - processamento assíncrono por fonte com Vercel Workflow e progresso persistido no Neon;
 - classificação preparatória `CANDIDATO_AUTOMACAO` ou `REVISAO_HUMANA`, sem executar ações críticas automaticamente.
 
-Validação desta versão: **28 testes automatizados aprovados**, importação das oito fontes operacionais validada e deployment de produção sem erros de runtime após a publicação.
+Validação local desta versão: **56 testes automatizados aprovados**, incluindo agrupamento por NF, detalhamento sob demanda, validação das receitas escolhidas, autorização, isolamento por centro, ownership de importações e auditoria das decisões.
+
+### Reforço de segurança desta versão
+
+- consultas de estoque, movimentações, unidades de medida, histórico, opções e alertas do dashboard agora respeitam o escopo de centro no backend;
+- pendências não podem ser tratadas por ID quando pertencem a um centro fora do escopo do usuário;
+- jobs e ciclos de importação possuem proprietário e fotografia dos centros/propriedades autorizados;
+- endpoints de consulta, reprocessamento e conciliação de jobs aplicam ownership para usuários não administradores;
+- exportações validam simultaneamente a permissão `export` e o acesso ao módulo solicitado;
+- a validação de sessão separa explicitamente o ID da sessão do ID do usuário, preservando a identidade correta nas regras e logs;
+- a chave de sessão previsível foi removida; produção e staging falham ao iniciar sem `SISDEV_SECRET_KEY`;
+- o entrypoint local/Procfile usa a API Flask autenticada, e o servidor HTTP legado ficou desativado por padrão e limitado a loopback;
+- migrações idempotentes adicionam ownership e índices de segurança aos jobs e ciclos existentes.
+
+O relatório técnico detalhado da auditoria é mantido como documento interno e não é publicado no repositório público.
 
 ## Fluxo operacional
 
@@ -83,7 +99,10 @@ Exemplo: `40 L ÷ 0,06 L/ha = 666,67 ha`.
 - Filtros por período, centro, direção, NF-e, status e preferência de RT.
 - Paginação de 25, 50, 100 ou 250 registros, com ordenação e total filtrado.
 - Pendências com diagnóstico, ação recomendada, confiança e exportação filtrada em CSV/XLSX.
-- Fila operacional **Regularizar SISDEV** para entradas e saídas, com saldo encontrado, necessidade, falta e saldo projetado.
+- Fila operacional **Regularizar SISDEV** consolidada por NF, com prioridade explicável, diagnóstico e ação recomendada.
+- Detalhamento sob demanda em árvore: produtos/lotes, receitas possíveis, SAP, SISDEV, conciliação, saldo, retorno/estorno e histórico.
+- Seleção humana de uma ou várias receitas, validação do volume total e confirmação/rejeição auditada.
+- Status separados para lançamento SAP, situação operacional, conciliação e tratamento humano.
 - Notas fiscais, receitas, movimentações e estoques em visões próprias.
 - Cadastros/dimensões derivados dos dados importados.
 - Mapeamentos persistentes de produto, propriedade/CNPJ, CNPJ-centro/URE, lote fabricante e regras.
@@ -97,6 +116,23 @@ Exemplo: `40 L ÷ 0,06 L/ha = 666,67 ha`.
 ### Regularizar SISDEV — saída
 
 A exportação inclui data, CNPJ, NF-e, série, produto, lote, quantidade, volume e quantidade de embalagem, receituário, ART, RT, cultura, diagnóstico, URE, dose e área calculada.
+
+### Fila inteligente e rastreabilidade por NF
+
+A listagem principal apresenta somente o resumo necessário para priorizar o trabalho. Todos os itens da mesma NF, série, CNPJ, direção e centro são agrupados em uma única linha. A fila pode ser ordenada por prioridade, data, NF, status, compatibilidade ou centro.
+
+O botão **Ver detalhe** carrega apenas o documento escolhido e abre a árvore de rastreabilidade. As sugestões de receita recebem um percentual de compatibilidade explicável, considerando produto, NF, janela D/D-1, quantidade, propriedade/CNPJ e RT preferencial. A sugestão nunca confirma automaticamente uma receita.
+
+Para saída, o usuário pode selecionar uma receita ou combinar várias até atingir o volume necessário. O backend rejeita identificadores que não pertencem ao documento e impede a confirmação quando o total selecionado diverge do necessário.
+
+As entradas não utilizam receitas. O emitente da NF define o fluxo operacional:
+
+- `TRANSFERENCIA_RETORNO`: emitente Boa Esperança Agropecuária (nome ou raiz CNPJ `01.722.958`). O detalhe pesquisa todas as saídas anteriores compatíveis com material, lote fabricante e unidade, apresenta as respectivas NFs e permite selecionar as movimentações SISDEV que servirão de referência para o estorno.
+- `ENTRADA_FORNECEDOR`: venda de fornecedor externo para a Boa Esperança. A regularização apresenta somente os dados fiscais, material, lote, quantidade e embalagem necessários ao lançamento da entrada.
+
+Nenhum estorno é executado automaticamente: a seleção e a confirmação permanecem sob decisão humana e são registradas na trilha de auditoria.
+
+As decisões correntes ficam em `document_decisions`; cada ação também entra na trilha imutável de `audit_log`, com usuário, data/hora, justificativa e resultado.
 
 ## Arquitetura
 
@@ -118,6 +154,7 @@ src/auditor/engine.py         parsers, importação em lote e regras de concilia
 src/auditor/normalization.py  números, documentos, lotes, unidades e texto
 src/web/                      interface web estática
 sql/import_jobs.sql           migração idempotente do Neon
+sql/regularization_queue.sql  fila por NF, decisões humanas e índices de consulta
 tests/                        testes de motor, API e orquestração
 pyproject.toml                dependências e registro do Workflow Python
 vercel.json                   roteamento e limites da Function
@@ -132,6 +169,7 @@ vercel.json                   roteamento e limites da Function
 - `source_records`: linhas normalizadas das fontes enviadas.
 - `expected_movements` / `actual_movements`: movimentos SAP e SISDEV.
 - `reconciliations` / `audit_issues`: resultado e alertas.
+- `document_decisions`: seleção/confirmação/rejeição humana por documento.
 - `reconciliation_mappings` / `app_settings`: premissas e mapeamentos configuráveis.
 
 Em produção, `Acompanhamento SISDEV.xlsx` e o PBIX **não são fontes de dados**. A estrutura histórica serviu como referência para regras e colunas; os registros usados são exclusivamente os arquivos enviados e persistidos no Neon.
@@ -156,6 +194,8 @@ Em produção, `Acompanhamento SISDEV.xlsx` e o PBIX **não são fontes de dados
 | `GET/POST /api/auth/users` | Consulta/criação de usuários pelo administrador |
 | `PATCH /api/auth/users/{id}` | Perfil, situação, senha e escopos do usuário |
 | `POST /api/pending/{id}/actions` | Registra tratamento humano da pendência |
+| `GET /api/regularization/{document_id}` | Carrega a rastreabilidade completa de uma NF sob demanda |
+| `POST /api/regularization/{document_id}/decisions` | Salva/confirma/rejeita receitas ou movimentações relacionadas |
 | `POST /api/admin/backups` | Cria snapshot privado de configurações |
 | `POST /api/admin/backups/{id}/restore-test` | Valida integridade e legibilidade do snapshot |
 | `POST /api/admin/backups/{id}/restore` | Restaura snapshot com confirmação e justificativa |
@@ -188,6 +228,7 @@ Antes da primeira publicação da fila, execute no Neon:
 sql/import_jobs.sql
 sql/security_access.sql
 sql/session_audit_hardening.sql
+sql/regularization_queue.sql
 ```
 
 Os scripts são idempotentes e podem ser reaplicados em atualizações de schema. Use conexão direta para a migração e a conexão pooled para a aplicação.

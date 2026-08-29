@@ -142,7 +142,9 @@ def ensure_bootstrap_admin() -> bool:
         return False
     connection = connect()
     try:
-        existing = connection.execute("SELECT COUNT(*) n FROM app_users").fetchone()["n"]
+        existing = connection.execute(
+            "SELECT COUNT(*) n FROM app_users WHERE deleted_at IS NULL"
+        ).fetchone()["n"]
     finally:
         connection.close()
     if existing:
@@ -207,7 +209,10 @@ def authenticate(email: str, password: str, ip_address: str = "") -> tuple[dict[
     try:
         if _recent_failures(connection, normalized_email, ip_address) >= 5:
             return None, "Muitas tentativas. Aguarde 15 minutos e tente novamente."
-        row = connection.execute("SELECT * FROM app_users WHERE email=?", (normalized_email,)).fetchone()
+        row = connection.execute(
+            "SELECT * FROM app_users WHERE email=? AND deleted_at IS NULL",
+            (normalized_email,),
+        ).fetchone()
         valid = bool(row and row["active"] and check_password_hash(row["password_hash"], password or ""))
         connection.execute(
             "INSERT INTO login_attempts(email,ip_address,success) VALUES (?,?,?)",
@@ -268,7 +273,9 @@ def validate_session(
     connection = connect()
     try:
         row = connection.execute(
-            """SELECT s.*,u.email,u.display_name,u.profile,u.active,u.password_hash
+            """SELECT u.id AS id,s.id AS session_id,s.user_id,s.token_hash,s.csrf_hash,
+                      s.ip_address,s.user_agent,s.expires_at,s.last_seen_at,s.revoked_at,
+                      u.email,u.display_name,u.profile,u.active,u.password_hash
                FROM auth_sessions s JOIN app_users u ON u.id=s.user_id
                WHERE s.token_hash=? AND s.revoked_at IS NULL""",
             (_hash_token(token),),
@@ -282,7 +289,7 @@ def validate_session(
         if expires_at is None or expires_at <= now or last_seen_at is None or last_seen_at <= idle_cutoff:
             connection.execute(
                 "UPDATE auth_sessions SET revoked_at=CURRENT_TIMESTAMP WHERE id=? AND revoked_at IS NULL",
-                (row["id"],),
+                (row["session_id"],),
             )
             connection.commit()
             return None
@@ -293,7 +300,10 @@ def validate_session(
         if csrf is not None and not hmac.compare_digest(row["csrf_hash"], _hash_token(csrf)):
             return None
         if touch:
-            connection.execute("UPDATE auth_sessions SET last_seen_at=CURRENT_TIMESTAMP WHERE id=?", (row["id"],))
+            connection.execute(
+                "UPDATE auth_sessions SET last_seen_at=CURRENT_TIMESTAMP WHERE id=?",
+                (row["session_id"],),
+            )
             connection.commit()
         return public_user(row, connection=connection)
     finally:

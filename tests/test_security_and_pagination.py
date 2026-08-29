@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sys
 import io
+import json
+import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -69,6 +71,17 @@ def test_session_is_bound_to_the_originating_browser(secure_client):
     ).status_code == 401
 
 
+def test_validated_session_keeps_the_application_user_id(secure_client):
+    create_user("first@example.com", "First", "Senha-segura-123", "CONSULTA")
+    user = create_user("second@example.com", "Second", "Senha-segura-123", "GESTOR")
+    login, _csrf = _login(secure_client, user["email"], "Senha-segura-123")
+    assert login.status_code == 200
+    with secure_client.session_transaction() as browser_session:
+        token = browser_session["auth_token"]
+    validated = validate_session(token)
+    assert validated["id"] == user["id"]
+
+
 def test_session_expires_after_thirty_minutes_of_inactivity(secure_client):
     user = create_user("idle@example.com", "Idle", "Senha-segura-123", "CONSULTA")
     token, _csrf = create_session(user["id"], user_agent="SISDEV-Test")
@@ -134,6 +147,76 @@ def test_users_page_uses_database_pagination(secure_client):
     }
 
 
+def test_admin_can_edit_and_soft_delete_existing_user(secure_client):
+    admin = create_user("admin@example.com", "Admin", "Senha-segura-123", "ADMINISTRADOR")
+    target = create_user(
+        "operator@example.com", "Operador", "Senha-segura-123", "OPERADOR",
+        scopes=[("CENTER", "1001")],
+    )
+    login, csrf = _login(secure_client, admin["email"], "Senha-segura-123")
+    assert login.status_code == 200
+
+    updated = secure_client.patch(
+        f"/api/auth/users/{target['id']}",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "display_name": "Auditor editado", "email": "auditor@example.com",
+            "profile": "AUDITOR", "active": True, "password": "Nova-senha-123",
+            "scopes": [{"scope_type": "CENTER", "scope_value": "2001"}],
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.get_json()["user"]["profile"] == "AUDITOR"
+    assert updated.get_json()["user"]["email"] == "auditor@example.com"
+    assert updated.get_json()["user"]["scopes"] == [
+        {"scope_type": "CENTER", "scope_value": "2001"},
+    ]
+
+    deleted = secure_client.delete(
+        f"/api/auth/users/{target['id']}",
+        headers={"X-CSRF-Token": csrf},
+        json={"justification": "Acesso encerrado"},
+    )
+    assert deleted.status_code == 200
+    listing = secure_client.get("/api/page/users?page=1&per_page=25").get_json()
+    assert listing["pagination"]["total"] == 1
+    assert listing["rows"][0]["id"] == admin["id"]
+
+    connection = database.connect()
+    removed = connection.execute("SELECT * FROM app_users WHERE id=?", (target["id"],)).fetchone()
+    scopes = connection.execute(
+        "SELECT COUNT(*) n FROM user_scopes WHERE user_id=?", (target["id"],)
+    ).fetchone()["n"]
+    audit = connection.execute(
+        "SELECT action,justification FROM audit_log WHERE module='USERS' AND entity_id=? ORDER BY id DESC",
+        (str(target["id"]),),
+    ).fetchone()
+    connection.close()
+    assert removed["active"] == 0 and removed["deleted_at"] is not None
+    assert scopes == 0
+    assert audit["action"] == "DELETE" and audit["justification"] == "Acesso encerrado"
+
+    secure_client.post("/api/auth/logout", headers={"X-CSRF-Token": csrf})
+    rejected, _ = _login(secure_client, "auditor@example.com", "Nova-senha-123")
+    assert rejected.status_code == 401
+
+
+def test_admin_cannot_delete_self_or_remove_last_active_admin(secure_client):
+    admin = create_user("admin@example.com", "Admin", "Senha-segura-123", "ADMINISTRADOR")
+    login, csrf = _login(secure_client, admin["email"], "Senha-segura-123")
+    assert login.status_code == 200
+    own_delete = secure_client.delete(
+        f"/api/auth/users/{admin['id']}", headers={"X-CSRF-Token": csrf}, json={},
+    )
+    assert own_delete.status_code == 409
+    downgrade = secure_client.patch(
+        f"/api/auth/users/{admin['id']}",
+        headers={"X-CSRF-Token": csrf},
+        json={"profile": "CONSULTA", "active": True},
+    )
+    assert downgrade.status_code == 409
+
+
 def test_profile_and_center_scope_are_enforced_in_backend(secure_client):
     create_user(
         "consulta@example.com", "Consulta", "Senha-segura-123", "CONSULTA",
@@ -146,6 +229,150 @@ def test_profile_and_center_scope_are_enforced_in_backend(secure_client):
         "/api/mappings", headers={"X-CSRF-Token": csrf},
         json={"mapping_type": "material_product", "source_value": "A", "target_value": "B"},
     ).status_code == 403
+
+
+def test_center_scope_covers_stock_movements_history_and_dashboard(secure_client):
+    connection = database.connect()
+    run_id = connection.execute(
+        "INSERT INTO import_runs(status,summary_json) VALUES ('SUCCESS','{}') RETURNING id"
+    ).fetchone()[0]
+    source_ids = []
+    for row_number, center in enumerate(("1001", "2000"), start=1):
+        raw = {
+            "Centro": center, "Texto breve material": f"PRODUTO {center}",
+            "Lote": f"LOTE-{center}", "Lote Fabricante": f"FAB-{center}",
+            "UMB": "L", "Utilização livre": 10, "Depósito": "D1",
+        }
+        source = connection.execute(
+            """INSERT INTO source_records(run_id,source,source_file,row_number,fingerprint,raw_json)
+               VALUES (?,'sap_stock','MB52.xlsx',?,?,?) RETURNING id""",
+            (run_id, row_number, f"fp-{center}", json.dumps(raw)),
+        ).fetchone()
+        source_ids.append(source[0])
+        connection.execute(
+            """INSERT INTO expected_movements(
+                   run_id,source_record_id,nf,series,direction,doc_date,sap_material,
+                   material_key,lot,manufacturer_lot,quantity,unit,center,cnpj,status
+               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                run_id, source[0], str(row_number), "1", "2", "2026-08-01",
+                f"PRODUTO {center}", f"PRODUTO {center}", f"LOTE-{center}",
+                f"FAB-{center}", 10, "L", center, f"CNPJ-{center}", "PENDENTE",
+            ),
+        )
+        connection.execute(
+            """INSERT INTO actual_movements(
+                   run_id,nf,series,movement_type,movement_date,product,product_key,
+                   lot,quantity,volume,unit,cnpj,status
+               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                run_id, str(row_number), "1", "saida", "2026-08-01",
+                f"PRODUTO {center}", f"PRODUTO {center}", f"FAB-{center}",
+                1, 10, "L", f"CNPJ-{center}", "OK",
+            ),
+        )
+    connection.execute(
+        "INSERT INTO audit_issues(run_id,severity,category,message) VALUES (?,'ALTA','GLOBAL','Alerta global')",
+        (run_id,),
+    )
+    connection.commit()
+    connection.close()
+
+    filters = {"allowed_centers": ["1001"]}
+    stocks = engine.page_records_v2("stocks", filters)["rows"]
+    movements = engine.page_records_v2("movements", filters)["rows"]
+    measures = engine.page_records_v2("units_measure", filters)["rows"]
+    history = engine.page_records_v2("history", filters)["rows"]
+    dashboard = engine.dashboard_v2(filters)
+
+    assert {row["centro"] for row in stocks} == {"1001"}
+    assert {row["centro"] for row in movements} == {"1001"}
+    assert measures == [{"unidade": "L", "ocorrencias": 1}]
+    assert history == [{"source": "sap_stock", "source_file": "MB52.xlsx", "linhas": 1}]
+    assert dashboard["options"]["centers"] == ["1001"]
+    assert dashboard["issues"] == []
+
+
+def test_export_requires_access_to_requested_module(secure_client):
+    create_user("consulta@example.com", "Consulta", "Senha-segura-123", "CONSULTA")
+    login, _csrf = _login(secure_client, "consulta@example.com", "Senha-segura-123")
+    assert login.status_code == 200
+    assert secure_client.get("/api/export/csv/regularization").status_code == 403
+    assert secure_client.get("/api/export/csv/reports").status_code == 200
+
+
+def test_pending_action_cannot_cross_center_scope(secure_client):
+    create_user(
+        "operator@example.com", "Operador", "Senha-segura-123", "OPERADOR",
+        scopes=[("CENTER", "1001")],
+    )
+    connection = database.connect()
+    run_id = connection.execute(
+        "INSERT INTO import_runs(status,summary_json) VALUES ('SUCCESS','{}') RETURNING id"
+    ).fetchone()[0]
+    expected_id = connection.execute(
+        """INSERT INTO expected_movements(run_id,nf,series,direction,center,status)
+           VALUES (?,'200','1','2','2000','PENDENTE') RETURNING id""",
+        (run_id,),
+    ).fetchone()[0]
+    reconciliation_id = connection.execute(
+        """INSERT INTO reconciliations(run_id,expected_id,status,diagnosis,confidence)
+           VALUES (?,?,'NAO_LANCADO','Teste','BAIXA') RETURNING id""",
+        (run_id, expected_id),
+    ).fetchone()[0]
+    connection.commit()
+    connection.close()
+
+    login, csrf = _login(secure_client, "operator@example.com", "Senha-segura-123")
+    assert login.status_code == 200
+    response = secure_client.post(
+        f"/api/pending/{reconciliation_id}/actions",
+        headers={"X-CSRF-Token": csrf},
+        json={"action": "REQUEST_REVIEW", "reason": "Teste de escopo"},
+    )
+    assert response.status_code == 404
+    connection = database.connect()
+    assert connection.execute("SELECT COUNT(*) n FROM action_history").fetchone()["n"] == 0
+    connection.close()
+
+
+def test_import_jobs_and_batches_are_owner_scoped(secure_client):
+    owner = create_user("owner@example.com", "Owner", "Senha-segura-123", "GESTOR")
+    viewer = create_user("viewer@example.com", "Viewer", "Senha-segura-123", "GESTOR")
+    connection = database.connect()
+    run_id = connection.execute(
+        "INSERT INTO import_runs(status,summary_json) VALUES ('RUNNING','{}') RETURNING id"
+    ).fetchone()[0]
+    batch_id = connection.execute(
+        """INSERT INTO import_batches(run_id,created_by,status,required_sources)
+           VALUES (?,?,'OPEN','sap_stock') RETURNING id""",
+        (run_id, owner["id"]),
+    ).fetchone()[0]
+    job_id = connection.execute(
+        """INSERT INTO import_jobs(batch_id,run_id,created_by,source,blob_path,status)
+           VALUES (?,?,?,'sap_stock','private/path','QUEUED') RETURNING id""",
+        (batch_id, run_id, owner["id"]),
+    ).fetchone()[0]
+    assert connection.execute(
+        "SELECT created_by FROM import_jobs WHERE id=?", (job_id,)
+    ).fetchone()["created_by"] == owner["id"]
+    connection.commit()
+    connection.close()
+
+    login, csrf = _login(secure_client, viewer["email"], "Senha-segura-123")
+    assert login.status_code == 200
+    assert login.get_json()["user"]["profile"] == "GESTOR"
+    status_response = secure_client.get(f"/api/import/{job_id}")
+    assert status_response.status_code == 404
+    assert secure_client.post(
+        f"/api/import/{job_id}", headers={"X-CSRF-Token": csrf}, json={}
+    ).status_code == 404
+    assert secure_client.get(f"/api/reconcile/{batch_id}").status_code == 404
+    assert secure_client.get("/api/import-jobs").get_json()["jobs"] == []
+
+
+def test_session_secret_has_no_predictable_public_fallback():
+    assert api.app.secret_key != "sisdev-local-development-only"
 
 
 def test_inactive_user_cannot_login(secure_client):
@@ -183,6 +410,32 @@ def test_invalid_upload_is_rejected_before_blob(secure_client):
     )
     assert response.status_code == 400
     assert "XLSX" in response.get_json()["error"]
+
+
+def test_agrotis_ooxml_with_legacy_xls_name_is_accepted_by_validation():
+    content = io.BytesIO()
+    with zipfile.ZipFile(content, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types />")
+        archive.writestr("xl/workbook.xml", "<workbook />")
+    content.seek(0)
+
+    assert api._spreadsheet_upload_error(content, ".xls") is None
+
+
+def test_legacy_xls_diagnostic_uses_non_reserved_log_metadata():
+    api.app.logger.info(
+        "Accepted OOXML workbook with legacy .xls filename",
+        extra={"source": "agrotis_recipe", "upload_filename": "ReceitasEmitidas.xls"},
+    )
+
+
+def test_arbitrary_zip_with_xls_name_is_rejected_by_validation():
+    content = io.BytesIO()
+    with zipfile.ZipFile(content, "w") as archive:
+        archive.writestr("document.txt", "not a workbook")
+    content.seek(0)
+
+    assert "Excel válida" in api._spreadsheet_upload_error(content, ".xls")
 
 
 def test_auditor_suggests_and_manager_approves_mapping(secure_client):
@@ -287,3 +540,93 @@ def test_balance_diagnostic_covers_full_partial_and_zero_stock():
 def test_csv_export_neutralizes_formula_cells():
     content = csv_bytes(["produto"], [{"produto": "=HYPERLINK(\"https://invalid\")"}]).decode("utf-8-sig")
     assert "'=HYPERLINK" in content
+
+
+def test_regularization_decision_validates_document_recipes_and_audits(secure_client, monkeypatch):
+    user = create_user("operator@example.com", "Operador", "Senha-segura-123", "OPERADOR")
+    login, csrf = _login(secure_client, user["email"], "Senha-segura-123")
+    assert login.status_code == 200
+
+    detail = {
+        "run_id": 77,
+        "document_id": "doc-123",
+        "document": {"numero_nfe": "123", "serie": "1", "centro": "1001"},
+        "items": [],
+        "recipes": [
+            {"recipe_id": "10", "quantidade_receita": 30},
+            {"recipe_id": "11", "quantidade_receita": 10},
+        ],
+        "recipe_selection": {"required": 40, "mode": "MULTIPLE"},
+        "return_chain": None,
+    }
+    monkeypatch.setattr(api, "regularization_document_detail", lambda *_args, **_kwargs: detail)
+
+    unknown = secure_client.post(
+        "/api/regularization/doc-123/decisions",
+        headers={"X-CSRF-Token": csrf},
+        json={"decision_type": "CONFIRM_RECIPE", "selected_ids": ["999"]},
+    )
+    assert unknown.status_code == 400
+
+    mismatch = secure_client.post(
+        "/api/regularization/doc-123/decisions",
+        headers={"X-CSRF-Token": csrf},
+        json={"decision_type": "CONFIRM_RECIPE", "selected_ids": ["10"]},
+    )
+    assert mismatch.status_code == 400
+    assert mismatch.get_json()["difference"] == 10
+
+    confirmed = secure_client.post(
+        "/api/regularization/doc-123/decisions",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "decision_type": "CONFIRM_RECIPE", "selected_ids": ["10", "11"],
+            "justification": "Volumes conferidos",
+        },
+    )
+    assert confirmed.status_code == 200
+    assert confirmed.get_json()["decision"]["status"] == "CONFIRMED"
+
+    connection = database.connect()
+    decision = connection.execute(
+        "SELECT * FROM document_decisions WHERE run_id=? AND document_key=?",
+        (77, "doc-123"),
+    ).fetchone()
+    audit = connection.execute(
+        "SELECT action,result FROM audit_log WHERE module='REGULARIZATION' AND entity_id='doc-123'"
+    ).fetchone()
+    connection.close()
+    assert decision["selected_ids_json"] == '["10", "11"]'
+    assert audit["action"] == "CONFIRM_RECIPE" and audit["result"] == "SUCCESS"
+
+
+def test_return_decision_accepts_multiple_related_movements(secure_client, monkeypatch):
+    user = create_user("return-operator@example.com", "Operador", "Senha-segura-123", "OPERADOR")
+    login, csrf = _login(secure_client, user["email"], "Senha-segura-123")
+    assert login.status_code == 200
+    detail = {
+        "run_id": 88,
+        "document_id": "return-doc",
+        "document": {"numero_nfe": "300", "serie": "1", "centro": "1001"},
+        "items": [], "recipes": [], "recipe_selection": {"required": 40},
+        "return_chain": {"movements": [{"id": 20}, {"id": 21}]},
+    }
+    monkeypatch.setattr(api, "regularization_document_detail", lambda *_args, **_kwargs: detail)
+
+    unknown = secure_client.post(
+        "/api/regularization/return-doc/decisions",
+        headers={"X-CSRF-Token": csrf},
+        json={"decision_type": "CONFIRM_MOVEMENT", "selected_ids": ["999"]},
+    )
+    assert unknown.status_code == 400
+
+    confirmed = secure_client.post(
+        "/api/regularization/return-doc/decisions",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "decision_type": "CONFIRM_MOVEMENT", "selected_ids": ["20", "21"],
+            "justification": "Saídas do lote conferidas",
+        },
+    )
+    assert confirmed.status_code == 200
+    assert confirmed.get_json()["decision"]["selected_ids"] == ["20", "21"]
