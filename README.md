@@ -29,7 +29,7 @@ Principais melhorias entregues:
 - processamento assíncrono por fonte com Vercel Workflow e progresso persistido no Neon;
 - classificação preparatória `CANDIDATO_AUTOMACAO` ou `REVISAO_HUMANA`, sem executar ações críticas automaticamente.
 
-Validação local desta versão: **56 testes automatizados aprovados**, incluindo agrupamento por NF, detalhamento sob demanda, validação das receitas escolhidas, autorização, isolamento por centro, ownership de importações e auditoria das decisões.
+Validação local desta versão: **57 testes automatizados aprovados**, incluindo agrupamento por NF/lote, detalhamento sob demanda, validação das receitas escolhidas, autorização, isolamento por centro, ownership de importações e auditoria das decisões.
 
 ### Reforço de segurança desta versão
 
@@ -79,7 +79,7 @@ O upload multipart atual aceita até **4 MB por arquivo**, margem segura para o 
 - Entrada e saída são derivadas da fonte SAP quando a planilha não possui direção explícita.
 - NF e série são normalizadas antes da comparação.
 - A conciliação considera NF, série, produto, direção, data, centro quando disponível, lote e quantidade.
-- Um movimento SISDEV não pode ser reutilizado em duas linhas SAP.
+- Um movimento SISDEV não é reutilizado entre grupos distintos. Quando o SAP divide a mesma NF/produto/lote em várias linhas e o SISDEV consolida o lote em uma única linha, a conciliação compara a soma SAP ao total SISDEV e registra o vínculo agregado de forma rastreável.
 - O lote do fabricante é prioritário; divergência desse lote é classificada como divergência, não como correto.
 - Quantidade SISDEV é calculada pelo valor absoluto de `embalagens × volume`.
 - Linhas exatamente duplicadas da exportação de movimentos SISDEV são removidas antes da conciliação e registradas como alerta.

@@ -621,6 +621,94 @@ def _actual_metadata(conn, actual_rows):
     return metadata
 
 
+def _expected_match_group(expected_row, product_mappings):
+    """Stable group used to reconcile SAP split lines against one SISDEV lot row."""
+
+    product_key = key(_product_name(expected_row["sap_material"]))
+    product_key = (product_mappings or {}).get(product_key, product_key)
+    return (
+        expected_row["nf"], expected_row["series"], product_key,
+        expected_row["manufacturer_lot"] or expected_row["lot"],
+        expected_row["direction"], expected_row["doc_date"],
+        key(expected_row["center"]), expected_row["unit"],
+    )
+
+
+def _exact_actual_candidate(expected_row, actual_row, metadata, product_mappings):
+    preferred_lot = expected_row["manufacturer_lot"] or expected_row["lot"]
+    if not preferred_lot or actual_row["lot"] != preferred_lot:
+        return False
+    if not _product_matches(expected_row["sap_material"], actual_row["product"], product_mappings):
+        return False
+    actual_meta = metadata.get(actual_row["id"], {})
+    if actual_meta.get("direction") and actual_meta["direction"] != expected_row["direction"]:
+        return False
+    if actual_meta.get("doc_date") and expected_row["doc_date"] and actual_meta["doc_date"] != expected_row["doc_date"]:
+        return False
+    if actual_meta.get("center") and expected_row["center"] and key(actual_meta["center"]) != key(expected_row["center"]):
+        return False
+    return True
+
+
+def _exact_group_assignments(expected, actual_by_document, metadata, product_mappings):
+    """Reserve exact lot matches and aggregate SAP lines when SISDEV consolidates them.
+
+    SISDEV commonly exports one row per NF/product/lot while SAP can split the
+    same lot into multiple lines.  The aggregate is safe only when exactly one
+    SISDEV row equals the summed SAP quantity.  Reservations also stop the
+    fallback matcher from stealing an actual row that belongs to a later lot.
+    """
+
+    groups = defaultdict(list)
+    for expected_row in expected:
+        if expected_row["nf"] and (expected_row["manufacturer_lot"] or expected_row["lot"]):
+            groups[_expected_match_group(expected_row, product_mappings)].append(expected_row)
+
+    reserved_for = {}
+    candidates_by_group = {}
+    for group_key, expected_rows in groups.items():
+        lead = expected_rows[0]
+        candidates = [
+            actual_row
+            for actual_row in actual_by_document.get((lead["nf"], lead["series"]), [])
+            if _exact_actual_candidate(lead, actual_row, metadata, product_mappings)
+        ]
+        candidates_by_group[group_key] = candidates
+        for actual_row in candidates:
+            reserved_for.setdefault(actual_row["id"], group_key)
+
+    assignments = {}
+    assigned_actual_ids = set()
+    for group_key, expected_rows in groups.items():
+        quantities = [row["quantity"] for row in expected_rows]
+        if any(value is None for value in quantities):
+            continue
+        expected_total = sum(quantities)
+        tolerance = max(0.001, abs(expected_total) * 0.000001)
+        exact_totals = []
+        for actual_row in candidates_by_group.get(group_key, []):
+            if actual_row["id"] in assigned_actual_ids:
+                continue
+            if reserved_for.get(actual_row["id"]) != group_key:
+                continue
+            if actual_row["quantity"] is None or actual_row["volume"] is None:
+                continue
+            actual_total = abs(actual_row["quantity"] * actual_row["volume"])
+            if abs(expected_total - actual_total) <= tolerance:
+                exact_totals.append(actual_row)
+        if len(exact_totals) != 1:
+            continue
+        chosen = exact_totals[0]
+        assigned_actual_ids.add(chosen["id"])
+        for expected_row in expected_rows:
+            assignments[expected_row["id"]] = {
+                "actual": chosen,
+                "expected_total": expected_total,
+                "expected_rows": len(expected_rows),
+            }
+    return assignments, reserved_for, assigned_actual_ids
+
+
 def _reconcile(conn, run_id):
     expected = conn.execute("SELECT * FROM expected_movements WHERE run_id=? ORDER BY id", (run_id,)).fetchall()
     actual = conn.execute("SELECT * FROM actual_movements WHERE run_id=? ORDER BY id", (run_id,)).fetchall()
@@ -629,20 +717,34 @@ def _reconcile(conn, run_id):
     actual_by_document = defaultdict(list)
     for actual_row in actual:
         actual_by_document[(actual_row["nf"], actual_row["series"])].append(actual_row)
-    used = set()
+    preassigned, reserved_for, used = _exact_group_assignments(
+        expected, actual_by_document, metadata, product_mappings
+    )
     reconciliation_rows = []
 
     for expected_row in expected:
-        doc_candidates = [
+        current_group = _expected_match_group(expected_row, product_mappings)
+        aggregate_assignment = preassigned.get(expected_row["id"])
+        doc_candidates = [] if aggregate_assignment else [
             row for row in actual_by_document.get((expected_row["nf"], expected_row["series"]), [])
             if row["id"] not in used
+            and reserved_for.get(row["id"], current_group) == current_group
         ]
         chosen = None
         status = "NAO_LANCADO"
         diagnosis = "NF e série não encontrados no SISDEV."
         confidence = "ALTA"
 
-        if not expected_row["nf"]:
+        if aggregate_assignment:
+            chosen = aggregate_assignment["actual"]
+            status = "CORRETO"
+            diagnosis = (
+                "Documento, produto, direção, data, lote fabricante e quantidade agregada compatíveis."
+                if aggregate_assignment["expected_rows"] > 1
+                else "Documento, produto, direção, data, lote fabricante e quantidade compatíveis."
+            )
+            confidence = "ALTA"
+        elif not expected_row["nf"]:
             status, diagnosis, confidence = "PENDENTE_DADOS", "Linha SAP sem número de NF para conciliação.", "BAIXA"
         elif doc_candidates:
             product_candidates = [row for row in doc_candidates if _product_matches(expected_row["sap_material"], row["product"], product_mappings)]
@@ -713,6 +815,11 @@ def _reconcile(conn, run_id):
             "nf": expected_row["nf"], "series": expected_row["series"], "sap_material": expected_row["sap_material"],
             "sap_lot": expected_row["lot"], "manufacturer_lot": expected_row["manufacturer_lot"],
         }
+        if aggregate_assignment:
+            details.update({
+                "aggregated_expected_rows": aggregate_assignment["expected_rows"],
+                "aggregated_expected_quantity": aggregate_assignment["expected_total"],
+            })
         reconciliation_rows.append(
             (run_id, expected_row["id"], chosen["id"] if chosen else None, status, diagnosis, json.dumps(details), confidence)
         )

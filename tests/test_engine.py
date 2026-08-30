@@ -216,6 +216,40 @@ class EngineDatabaseTests(unittest.TestCase):
         self.assertEqual(statuses.count("NAO_LANCADO"), 1)
         self.assertEqual(direction, "2")
 
+    def test_reconciliation_aggregates_split_sap_lines_before_matching_other_lots(self):
+        run_id = engine.create_import_run()
+        sap_first = self._sap_row(lot="0622258820")
+        sap_first.update({"Lote Fabricante": "0622258820", "Quantidade": 340.0})
+        sap_second = dict(sap_first)
+        sap_second["Quantidade"] = 1200.0
+        sap_other = self._sap_row(lot="0015268820")
+        sap_other.update({"Lote Fabricante": "0015268820", "Quantidade": 2920.0})
+        sisdev_first = self._sisdev_row(lot="0622258820")
+        sisdev_first.update({"QNT": -77.0, "VOLUME": 20.0})
+        sisdev_other = self._sisdev_row(lot="0015268820")
+        sisdev_other.update({"QNT": -146.0, "VOLUME": 20.0})
+        sources = {
+            "sap_exit_current": [(2, sap_first), (3, sap_second), (4, sap_other)],
+            "sisdev_movement": [(5, sisdev_first), (6, sisdev_other)],
+        }
+        with mock.patch.object(engine, "_read_source", side_effect=lambda source, path: sources[source]):
+            engine.import_source(run_id, "sap_exit_current", self._path("exit.xlsx"))
+            engine.import_source(run_id, "sisdev_movement", self._path("movement.xlsx"))
+        engine.reconcile_run(run_id, require_complete=False)
+
+        with database.connect() as conn:
+            rows = conn.execute(
+                """SELECT r.status,r.actual_id,r.details_json,e.manufacturer_lot
+                   FROM reconciliations r JOIN expected_movements e ON e.id=r.expected_id
+                   ORDER BY e.id"""
+            ).fetchall()
+        self.assertEqual([row["status"] for row in rows], ["CORRETO", "CORRETO", "CORRETO"])
+        self.assertEqual(rows[0]["actual_id"], rows[1]["actual_id"])
+        self.assertNotEqual(rows[1]["actual_id"], rows[2]["actual_id"])
+        grouped_details = json.loads(rows[0]["details_json"])
+        self.assertEqual(grouped_details["aggregated_expected_rows"], 2)
+        self.assertEqual(grouped_details["aggregated_expected_quantity"], 1540.0)
+
     def test_manufacturer_lot_difference_is_not_classified_correct(self):
         run_id = engine.create_import_run()
         sources = {
