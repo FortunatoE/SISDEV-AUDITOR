@@ -6,7 +6,7 @@ Aplicação web para auditoria, conciliação e preparação operacional de lan�
 
 ![SISDEV Auditor — funcionalidades e segurança](docs/linkedin/sisdev-auditor-funcionalidades-seguranca.png)
 
-## Versão — 29 agosto de 2026
+## Versão — 13 setembro de 2026
 
 Esta versão consolida a evolução da aplicação para uma plataforma protegida de análise, auditoria e orientação operacional. Está publicada em [sisdev-auditor.vercel.app](https://sisdev-auditor.vercel.app/).
 
@@ -27,9 +27,10 @@ Principais melhorias entregues:
 - uploads validados e arquivos originais privados no Vercel Blob;
 - backup privado de configurações com verificação e restauração administrativa;
 - processamento assíncrono por fonte com Vercel Workflow e progresso persistido no Neon;
+- Fluid Compute habilitado e fontes grandes divididas em etapas duráveis de até 5.000 linhas, com checkpoints internos a cada 1.000 registros;
 - classificação preparatória `CANDIDATO_AUTOMACAO` ou `REVISAO_HUMANA`, sem executar ações críticas automaticamente.
 
-Validação local desta versão: **57 testes automatizados aprovados**, incluindo agrupamento por NF/lote, detalhamento sob demanda, validação das receitas escolhidas, autorização, isolamento por centro, ownership de importações e auditoria das decisões.
+Validação local desta versão: **58 testes automatizados aprovados**, incluindo retomada durável de importações, agrupamento por NF/lote, detalhamento sob demanda, validação das receitas escolhidas, autorização, isolamento por centro, ownership de importações e auditoria das decisões.
 
 ### Reforço de segurança desta versão
 
@@ -51,10 +52,11 @@ O relatório técnico detalhado da auditoria é mantido como documento interno e
 2. O arquivo original é armazenado no Vercel Blob.
 3. A API registra um `import_job` no Neon e devolve o `job_id`.
 4. O botão **Processar esta fonte** inicia um Vercel Workflow assíncrono.
-5. A fonte é lida uma única vez e gravada no Neon em lotes de 1.000 registros, com progresso persistido.
-6. A interface consulta o job e mostra `Aguardando`, `Processando`, `Concluído`, `Concluído com alertas` ou `Falhou`.
-7. Depois das oito fontes obrigatórias, **Conciliar fontes concluídas** executa a conciliação em uma etapa separada.
-8. Dashboard, páginas e exportações leem somente a execução consolidada no Neon.
+5. Cada execução durável avança no máximo 5.000 linhas e grava checkpoints no Neon a cada 1.000 registros.
+6. Se uma execução for interrompida, o Workflow retoma automaticamente do último cursor confirmado, sem duplicar linhas já persistidas.
+7. A interface consulta o job e mostra `Aguardando`, `Processando`, `Concluído`, `Concluído com alertas` ou `Falhou`.
+8. Depois das oito fontes obrigatórias, **Conciliar fontes concluídas** executa a conciliação em uma etapa separada.
+9. Dashboard, páginas e exportações leem somente a execução consolidada no Neon.
 
 O clique HTTP apenas inicia o Workflow. O processamento não fica preso ao tempo da requisição do navegador.
 

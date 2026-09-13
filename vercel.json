@@ -1,6 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "flask",
+  "fluid": true,
   "functions": {
     "api/index.py": {
       "maxDuration": 60,

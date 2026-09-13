@@ -7,6 +7,7 @@ so a retry resumes from ``cursor_row`` instead of restarting the HTTP request.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import sys
@@ -25,6 +26,9 @@ sys.path.insert(0, str(ROOT / "src"))
 wf = Workflows(namespace="sisdev")
 
 FINISHED_JOB_STATUSES = {"COMPLETED", "COMPLETED_WITH_WARNINGS"}
+MAX_ROWS_PER_STEP = 5000
+
+logger = logging.getLogger(__name__)
 
 
 def _connect():
@@ -80,6 +84,11 @@ def _friendly_error(error: BaseException) -> str:
         return "O arquivo original não foi encontrado no Blob. Envie a fonte novamente."
     if "timed out" in lowered or "timeout" in lowered:
         return "A etapa excedeu o tempo disponível e poderá ser retomada."
+    if any(fragment in lowered for fragment in (
+        "connection is closed", "connection has been closed", "server closed the connection",
+        "ssl connection has been closed", "consuming input failed",
+    )):
+        return "A conexão temporária com o banco foi interrompida. Tente novamente para retomar do último lote."
     if "conteúdo do arquivo não corresponde" in lowered:
         return "O arquivo enviado não corresponde ao formato selecionado."
     if "blob" in lowered or "http error" in lowered or "urlopen" in lowered:
@@ -252,13 +261,16 @@ def _process_source_once(job_id: int) -> dict[str, Any]:
     local_path = _download_job_blob(job)
     from auditor.engine import import_source
 
+    batch_size = max(1, int(job.get("batch_size") or 1000))
+    rows_per_step = max(batch_size, min(MAX_ROWS_PER_STEP, batch_size * 5))
+
     result = import_source(
         int(job["run_id"]),
         str(job["source"]),
         local_path,
-        batch_size=int(job.get("batch_size") or 1000),
+        batch_size=batch_size,
         cursor=resume_cursor,
-        max_rows=None,
+        max_rows=rows_per_step,
         progress_callback=lambda progress: _update_progress(
             job_id,
             progress,
@@ -325,7 +337,7 @@ def _process_source_once(job_id: int) -> dict[str, Any]:
     }
 
 
-def _mark_import_failed(job_id: int, message: str) -> None:
+def _mark_import_failed(job_id: int, message: str, technical_code: str | None = None) -> None:
     connection = _connect()
     try:
         job = connection.execute("SELECT * FROM import_jobs WHERE id=?", (job_id,)).fetchone()
@@ -348,6 +360,7 @@ def _mark_import_failed(job_id: int, message: str) -> None:
             processed_rows=int(job.get("processed_rows") or 0),
             total_rows=int(job.get("total_rows") or 0),
             message=message,
+            payload={"technical_code": technical_code} if technical_code else None,
         )
         connection.commit()
     finally:
@@ -360,16 +373,26 @@ async def process_import_source(job_id: int) -> dict[str, Any]:
 
 
 @wf.step(max_retries=0)
-async def mark_import_failed(job_id: int, message: str) -> None:
-    _mark_import_failed(job_id, message)
+async def mark_import_failed(job_id: int, message: str, technical_code: str | None = None) -> None:
+    _mark_import_failed(job_id, message, technical_code)
 
 
 @wf.workflow
 async def process_import_job(job_id: int) -> dict[str, Any]:
     try:
-        return await process_import_source(job_id)
+        previous_cursor = -1
+        while True:
+            result = await process_import_source(job_id)
+            if result.get("done"):
+                return result
+            current_cursor = int(result.get("processed_rows") or 0)
+            if current_cursor <= previous_cursor:
+                raise RuntimeError("O processamento não avançou para o próximo lote.")
+            previous_cursor = current_cursor
     except Exception as error:
-        await mark_import_failed(job_id, _friendly_error(error))
+        technical_code = type(error).__name__
+        logger.exception("Import workflow failed", extra={"job_id": job_id, "technical_code": technical_code})
+        await mark_import_failed(job_id, _friendly_error(error), technical_code)
         raise
 
 

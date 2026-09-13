@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -145,6 +146,7 @@ def test_workflow_retry_resumes_cursor_and_keeps_cumulative_progress(client, mon
     monkeypatch.setattr(engine, "import_source", fake_import_source)
     result = workflow_imports._process_source_once(job_id)
     assert seen["cursor"] == 100
+    assert seen["max_rows"] == 5000
     assert result["done"] is True
 
     connection = database.connect()
@@ -154,6 +156,27 @@ def test_workflow_retry_resumes_cursor_and_keeps_cumulative_progress(client, mon
     assert job["duplicate_rows"] == 8
     assert job["cursor_row"] == 200
     assert job["status"] == "COMPLETED_WITH_WARNINGS"
+
+
+def test_workflow_processes_source_in_durable_steps_until_done(monkeypatch):
+    cursors = iter((5000, 10000, 12000))
+    calls = []
+
+    async def fake_step(job_id):
+        cursor = next(cursors)
+        calls.append((job_id, cursor))
+        return {
+            "job_id": job_id,
+            "processed_rows": cursor,
+            "total_rows": 12000,
+            "done": cursor == 12000,
+        }
+
+    monkeypatch.setattr(workflow_imports, "process_import_source", fake_step)
+    result = asyncio.run(workflow_imports.process_import_job.func(99))
+
+    assert result["done"] is True
+    assert calls == [(99, 5000), (99, 10000), (99, 12000)]
 
 
 def test_unknown_api_route_is_json_404(client):
