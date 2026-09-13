@@ -61,6 +61,7 @@ from auditor.work_queue import (
     add_work_comment,
     save_work_item,
     work_comments,
+    work_queue_export_rows,
     work_queue_rows,
 )
 
@@ -87,7 +88,7 @@ STATUS_LABELS = {
 }
 EXPORTABLE_PAGES = {
     "pending", "regularization", "analysis", "invoices", "recipes", "movements",
-    "stocks", "reports", "history", "materials", "lots", "units",
+    "stocks", "reports", "history", "materials", "lots", "units", "work_queue",
     "movement_types", "units_measure", "logs", "rules",
 }
 
@@ -1825,6 +1826,8 @@ def export(fmt: str, page_name: str):
         rows = validation_rows(filters=filters)
     elif page_name == "regularization":
         rows = regularization_export_rows(filters)
+    elif page_name == "work_queue":
+        rows = work_queue_export_rows(filters)
     else:
         rows = page_records_v2(page_name, filters).get("rows", [])
     columns = list(rows[0]) if rows else []

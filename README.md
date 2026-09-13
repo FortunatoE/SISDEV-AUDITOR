@@ -119,6 +119,7 @@ Exemplo: `40 L ÷ 0,06 L/ha = 666,67 ha`.
 - Central operacional do ciclo de importação, atualizada automaticamente enquanto houver worker ativo.
 - Linha do tempo pesquisável no formato `Produto & Lote`, com documentos SAP, movimentos SISDEV, receitas Agrotis, tratamentos auditados e saldo oficial dos arquivos de estoque.
 - Fila diária de trabalho baseada nas pendências reais, com responsável, prioridade, prazo, andamento, comentários e validação pelo gestor.
+- Gestão da fila com indicadores de atraso, vencimento no dia e tarefas sem responsável; filtros próprios e exportação CSV/XLSX respeitando a visão selecionada.
 - Backup privado das configurações, teste de restauração e restauração administrativa confirmada.
 
 ### Regularizar SISDEV — saída
@@ -160,9 +161,11 @@ workflow/imports.py           Workflows duráveis de importação e conciliaçã
 src/auditor/database.py       SQLite local / Neon e schema
 src/auditor/engine.py         parsers, importação em lote e regras de conciliação
 src/auditor/normalization.py  números, documentos, lotes, unidades e texto
+src/auditor/work_queue.py     fila diária, SLA, responsáveis e exportação
 src/web/                      interface web estática
 sql/import_jobs.sql           migração idempotente do Neon
 sql/regularization_queue.sql  fila por NF, decisões humanas e índices de consulta
+sql/work_queue.sql            tarefas, comentários, responsáveis e prazos
 tests/                        testes de motor, API e orquestração
 pyproject.toml                dependências e registro do Workflow Python
 vercel.json                   roteamento e limites da Function
@@ -178,6 +181,7 @@ vercel.json                   roteamento e limites da Function
 - `expected_movements` / `actual_movements`: movimentos SAP e SISDEV.
 - `reconciliations` / `audit_issues`: resultado e alertas.
 - `document_decisions`: seleção/confirmação/rejeição humana por documento.
+- `work_items` / `work_item_comments`: andamento, responsável, prioridade, prazo e colaboração na fila diária.
 - `reconciliation_mappings` / `app_settings`: premissas e mapeamentos configuráveis.
 
 Em produção, `Acompanhamento SISDEV.xlsx` e o PBIX **não são fontes de dados**. A estrutura histórica serviu como referência para regras e colunas; os registros usados são exclusivamente os arquivos enviados e persistidos no Neon.
@@ -202,6 +206,9 @@ Em produção, `Acompanhamento SISDEV.xlsx` e o PBIX **não são fontes de dados
 | `GET/POST /api/auth/users` | Consulta/criação de usuários pelo administrador |
 | `PATCH /api/auth/users/{id}` | Perfil, situação, senha e escopos do usuário |
 | `POST /api/pending/{id}/actions` | Registra tratamento humano da pendência |
+| `GET /api/work-items` | Lista a fila diária com paginação, SLA e filtros gerenciais |
+| `PATCH /api/work-items/{document_id}` | Atualiza andamento, responsável, prioridade e prazo |
+| `GET/POST /api/work-items/{document_id}/comments` | Consulta e registra comentários da tarefa |
 | `GET /api/regularization/{document_id}` | Carrega a rastreabilidade completa de uma NF sob demanda |
 | `POST /api/regularization/{document_id}/decisions` | Salva/confirma/rejeita receitas ou movimentações relacionadas |
 | `POST /api/admin/backups` | Cria snapshot privado de configurações |
@@ -237,6 +244,7 @@ sql/import_jobs.sql
 sql/security_access.sql
 sql/session_audit_hardening.sql
 sql/regularization_queue.sql
+sql/work_queue.sql
 ```
 
 Os scripts são idempotentes e podem ser reaplicados em atualizações de schema. Use conexão direta para a migração e a conexão pooled para a aplicação.

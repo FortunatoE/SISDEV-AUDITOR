@@ -720,6 +720,8 @@ body[data-profile="AUDITOR"] #work-due-label,
 body[data-profile="OPERADOR"] #work-assignee-label,
 body[data-profile="OPERADOR"] #work-priority-label,
 body[data-profile="OPERADOR"] #work-due-label { opacity: .65; }
+.work-queue-filters { display: flex; gap: 7px; flex-wrap: wrap; align-items: center; }
+.work-queue-filters select { min-width: 145px; }
 .trace-origin { font-weight: 800; }
 .trace-origin.sap { color: #72bdf0; }
 .trace-origin.sisdev { color: #5ed989; }

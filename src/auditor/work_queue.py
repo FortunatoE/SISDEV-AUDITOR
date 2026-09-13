@@ -60,13 +60,27 @@ def work_queue_rows(filters: dict[str, Any] | None = None) -> dict[str, Any]:
         }
         for row in rows:
             saved = persisted.get(row["document_id"], {})
+            work_status = saved.get("status") or "NOVA"
+            due_date = saved.get("due_date")
+            today = date.today().isoformat()
+            if key(work_status) in {"REGULARIZADA", "VALIDADA"}:
+                due_status = "CONCLUIDA"
+            elif not due_date:
+                due_status = "SEM_PRAZO"
+            elif str(due_date) < today:
+                due_status = "ATRASADA"
+            elif str(due_date) == today:
+                due_status = "VENCE_HOJE"
+            else:
+                due_status = "NO_PRAZO"
             row.update({
                 "work_item_id": saved.get("id"),
-                "andamento": saved.get("status") or "NOVA",
+                "andamento": work_status,
                 "responsavel_id": saved.get("assigned_to"),
                 "responsavel": saved.get("assigned_name") or "Não atribuído",
                 "prioridade_trabalho": saved.get("priority") or key(row.get("prioridade") or "MEDIA"),
-                "prazo": saved.get("due_date"),
+                "prazo": due_date,
+                "situacao_prazo": due_status,
                 "comentarios": int(saved.get("comments_count") or 0),
                 "atualizado_em": saved.get("updated_at"),
             })
@@ -79,23 +93,41 @@ def work_queue_rows(filters: dict[str, Any] | None = None) -> dict[str, Any]:
             rows = [row for row in rows if key(row.get("prioridade_trabalho")) == requested_priority]
         assigned = text(filters.get("assigned_to"))
         if assigned:
-            rows = [row for row in rows if str(row.get("responsavel_id") or "") == assigned]
+            if assigned == "__unassigned__":
+                rows = [row for row in rows if not row.get("responsavel_id")]
+            else:
+                rows = [row for row in rows if str(row.get("responsavel_id") or "") == assigned]
+        requested_due = key(filters.get("due_status"))
+        if requested_due:
+            rows = [row for row in rows if key(row.get("situacao_prazo")) == requested_due]
 
         priority_order = {"ALTA": 0, "MEDIA": 1, "BAIXA": 2}
         status_order = {value: index for index, value in enumerate(WORK_STATUSES)}
-        rows.sort(key=lambda row: (
-            status_order.get(key(row.get("andamento")), 99),
-            priority_order.get(key(row.get("prioridade_trabalho")), 99),
-            row.get("prazo") or "9999-12-31",
-            row.get("data_documento") or "",
-        ))
+        sort_name = key(filters.get("sort") or "PRIORIDADE")
+        sorters = {
+            "PRAZO": lambda row: (row.get("prazo") or "9999-12-31",),
+            "DATA": lambda row: (row.get("data_documento") or "",),
+            "NF": lambda row: (row.get("numero_nfe") or "",),
+            "STATUS": lambda row: (status_order.get(key(row.get("andamento")), 99),),
+            "RESPONSAVEL": lambda row: (key(row.get("responsavel")),),
+            "CENTRO": lambda row: (row.get("centro") or "",),
+            "PRIORIDADE": lambda row: (priority_order.get(key(row.get("prioridade_trabalho")), 99),),
+            "PRIORIDADE_TRABALHO": lambda row: (priority_order.get(key(row.get("prioridade_trabalho")), 99),),
+            "NUMERO_NFE": lambda row: (row.get("numero_nfe") or "",),
+            "DATA_DOCUMENTO": lambda row: (row.get("data_documento") or "",),
+            "ANDAMENTO": lambda row: (status_order.get(key(row.get("andamento")), 99),),
+            "SITUACAO_PRAZO": lambda row: (key(row.get("situacao_prazo")),),
+        }
+        sorter = sorters.get(sort_name, sorters["PRIORIDADE"])
+        reverse = text(filters.get("order")).lower() == "desc"
+        rows.sort(key=lambda row: (*sorter(row), row.get("data_documento") or "", row.get("document_id") or ""), reverse=reverse)
         page, per_page = _page_values(filters)
         total = len(rows)
         total_pages = (total + per_page - 1) // per_page if total else 0
         if total_pages and page > total_pages:
             page = total_pages
         offset = (page - 1) * per_page
-        visible = rows[offset:offset + per_page]
+        visible = rows if filters.get("export") else rows[offset:offset + per_page]
         return {
             "ready": True,
             "run_id": run_id,
@@ -106,6 +138,9 @@ def work_queue_rows(filters: dict[str, Any] | None = None) -> dict[str, Any]:
                 "em_analise": sum(key(row.get("andamento")) == "EM_ANALISE" for row in rows),
                 "aguardando": sum(key(row.get("andamento")) == "AGUARDANDO_INFORMACAO" for row in rows),
                 "vencidas": sum(bool(row.get("prazo")) and str(row["prazo"]) < date.today().isoformat() and key(row.get("andamento")) not in {"REGULARIZADA", "VALIDADA"} for row in rows),
+                "vence_hoje": sum(key(row.get("situacao_prazo")) == "VENCE_HOJE" for row in rows),
+                "sem_responsavel": sum(not row.get("responsavel_id") for row in rows),
+                "concluidas": sum(key(row.get("andamento")) in {"REGULARIZADA", "VALIDADA"} for row in rows),
             },
             "pagination": {
                 "page": page, "per_page": per_page, "total": total,
@@ -115,6 +150,25 @@ def work_queue_rows(filters: dict[str, Any] | None = None) -> dict[str, Any]:
         }
     finally:
         conn.close()
+
+
+def work_queue_export_rows(filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    export_filters = dict(filters or {})
+    export_filters["export"] = "1"
+    payload = work_queue_rows(export_filters)
+    columns = (
+        ("Prioridade", "prioridade_trabalho"), ("Andamento", "andamento"),
+        ("Situação do prazo", "situacao_prazo"), ("Prazo", "prazo"),
+        ("Responsável", "responsavel"), ("Número da NF-e", "numero_nfe"),
+        ("Série", "serie"), ("Data do documento", "data_documento"),
+        ("Centro", "centro"), ("Direção", "direcao"), ("Situação", "situacao"),
+        ("Diagnóstico", "diagnostico_situacao"), ("Ação recomendada", "acao_recomendada"),
+        ("Produto", "produto"), ("Comentários", "comentarios"),
+    )
+    return [
+        {label: row.get(field) for label, field in columns}
+        for row in payload.get("rows", [])
+    ]
 
 
 def active_assignees() -> list[dict[str, Any]]:

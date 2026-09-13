@@ -20,7 +20,7 @@ const UPLOAD_SOURCES = [
 
 const PAGE_CONFIG = {
   pending: { title: 'Pendências', description: 'Análise lote a lote dos documentos que exigem conferência.', empty: 'Nenhuma pendência encontrada.', columns: ['status', 'situacao_descricao', 'acao_recomendada', 'diagnosis', 'confidence', 'classificacao_automacao', 'nf', 'series', 'doc_date', 'center', 'direcao', 'sap_material', 'lote_sap', 'lote_fabricante', 'quantidade_sap', 'unidade_sap', 'produto_sisdev', 'lote_sisdev', 'quantidade_sisdev'] },
-  work_queue: { title: 'Fila de trabalho', description: 'Pendências do dia com responsável, prioridade, prazo e histórico de tratamento.', empty: 'Nenhuma tarefa pendente.', columns: ['prioridade_trabalho', 'andamento', 'responsavel', 'prazo', 'numero_nfe', 'serie', 'data_documento', 'centro', 'direcao', 'situacao', 'acao_recomendada', 'comentarios', '__work_actions'] },
+  work_queue: { title: 'Fila de trabalho', description: 'Pendências do dia com responsável, prioridade, prazo e histórico de tratamento.', empty: 'Nenhuma tarefa pendente.', columns: ['prioridade_trabalho', 'andamento', 'situacao_prazo', 'prazo', 'responsavel', 'numero_nfe', 'serie', 'data_documento', 'centro', 'direcao', 'situacao', 'acao_recomendada', 'comentarios', '__work_actions'] },
   regularization: { title: 'Regularizar SISDEV', description: 'Fila inteligente por nota fiscal: resumo primeiro e rastreabilidade sob demanda.', empty: 'Nenhuma nota fiscal para regularizar.', columns: ['prioridade', 'situacao', 'diagnostico_situacao', 'status_saldo', 'acao_recomendada', 'numero_nfe', 'serie', 'data_documento', 'cnpj', 'produto', 'volume_embalagem', 'quantidade_embalagem', 'itens_resumo', '__detail'] },
   analysis: { title: 'Análises', description: 'Resumo das ocorrências por status, diagnóstico e confiança.', empty: 'Nenhuma análise disponível.', columns: ['status', 'diagnosis', 'confidence', 'ocorrencias'] },
   invoices: { title: 'Notas Fiscais', description: 'Notas fiscais SAP consolidadas por documento, centro e direção.', empty: 'Nenhuma nota fiscal encontrada.', columns: ['nf', 'series', 'doc_date', 'center', 'direcao', 'linhas', 'quantidade_sap'] },
@@ -63,6 +63,7 @@ const LABELS = {
   emitente: 'Emitente', tipo_entrada: 'Tipo de entrada',
   prioridade_trabalho: 'Prioridade', andamento: 'Andamento', responsavel: 'Responsável',
   prazo: 'Prazo', comentarios: 'Comentários',
+  situacao_prazo: 'Situação do prazo',
 };
 
 const state = {
@@ -89,6 +90,9 @@ const state = {
   lotTraceSearchTimer: 0,
   workQueueAssignees: [],
   editingWorkItem: null,
+  workQueuePriority: '',
+  workQueueAssignee: '',
+  workQueueDueStatus: '',
 };
 
 class ApiError extends Error {
@@ -169,6 +173,9 @@ function qs() {
     per_page: String(state.perPage),
     sort: state.sort,
     order: state.order,
+    priority: state.current === 'work_queue' ? state.workQueuePriority : '',
+    assigned_to: state.current === 'work_queue' ? state.workQueueAssignee : '',
+    due_status: state.current === 'work_queue' ? state.workQueueDueStatus : '',
   });
 }
 
@@ -1043,9 +1050,9 @@ function isStatusColumn(column) {
 
 function recordStatusClass(value) {
   const normalized = String(value || '').toUpperCase();
-  if (/CORRETO|CONCLU|REGULARIZADA|VALIDADA|ALTA|SUCESS/.test(normalized)) return 'completed';
-  if (/NOVA|AGUARDANDO|ALERTA|PENDENTE|M[ÉE]DIA/.test(normalized)) return 'warning';
-  if (/DIVERG|FALH|ERRO|N[ÃA]O_LAN[ÇC]ADO/.test(normalized)) return 'failed';
+  if (/CORRETO|CONCLU|REGULARIZADA|VALIDADA|NO_PRAZO|ALTA|SUCESS/.test(normalized)) return 'completed';
+  if (/NOVA|VENCE_HOJE|SEM_PRAZO|AGUARDANDO|ALERTA|PENDENTE|M[ÉE]DIA/.test(normalized)) return 'warning';
+  if (/ATRASADA|DIVERG|FALH|ERRO|N[ÃA]O_LAN[ÇC]ADO/.test(normalized)) return 'failed';
   if (/PROCESS|AN[ÁA]LISE/.test(normalized)) return 'processing';
   return '';
 }
@@ -1136,7 +1143,7 @@ function renderPageTable(page, data) {
           return create('td', { className: `regularization-explanation regularization-${column}`, title: text },
             create('div', { className: 'cell-clamp', text }));
         }
-        if (isStatusColumn(column)) return create('td', {}, create('span', { className: `tag ${recordStatusClass(text)}`.trim(), text }));
+        if (isStatusColumn(column) || column === 'situacao_prazo') return create('td', {}, create('span', { className: `tag ${recordStatusClass(text)}`.trim(), text }));
         return create('td', { text, title: text.length > 80 ? text : '' });
       });
       const rowClass = page === 'regularization' ? `regularization-row priority-${String(row.prioridade || '').toLowerCase()}` : '';
@@ -1453,7 +1460,7 @@ function renderPageSummary(page, summary) {
   if (page === 'work_queue') {
     box.append(
       create('strong', { text: `${formatNumber(summary.total)} tarefas no ciclo atual` }),
-      document.createTextNode(` · ${formatNumber(summary.novas)} novas · ${formatNumber(summary.em_analise)} em análise · ${formatNumber(summary.aguardando)} aguardando informação · ${formatNumber(summary.vencidas)} vencidas.`),
+      document.createTextNode(` · ${formatNumber(summary.novas)} novas · ${formatNumber(summary.em_analise)} em análise · ${formatNumber(summary.aguardando)} aguardando informação · ${formatNumber(summary.vencidas)} vencidas · ${formatNumber(summary.vence_hoje)} vencem hoje · ${formatNumber(summary.sem_responsavel)} sem responsável.`),
     );
   } else {
     box.append(
@@ -1464,7 +1471,7 @@ function renderPageSummary(page, summary) {
 }
 
 function addExportButtons(container, page) {
-  if (!['reports', 'regularization', 'pending'].includes(page)) return;
+  if (!['reports', 'regularization', 'pending', 'work_queue'].includes(page)) return;
   const csv = create('button', { type: 'button', text: 'Exportar CSV' });
   const excel = create('button', { type: 'button', text: 'Exportar Excel' });
   csv.addEventListener('click', () => window.location.assign(`/api/export/csv/${page}?${qs()}`));
@@ -1505,6 +1512,32 @@ function renderPageActions(page) {
   const actions = $('page-actions');
   actions.replaceChildren();
   addExportButtons(actions, page);
+  if (page === 'work_queue') {
+    const priority = create('select', { attrs: { 'aria-label': 'Filtrar por prioridade' } });
+    priority.append(new Option('Todas as prioridades', ''));
+    for (const value of ['ALTA', 'MEDIA', 'BAIXA']) priority.append(new Option(formatLabel(value), value, false, state.workQueuePriority === value));
+    priority.addEventListener('change', () => { state.workQueuePriority = priority.value; state.page = 1; loadPage(page); });
+
+    const assignee = create('select', { attrs: { 'aria-label': 'Filtrar por responsável' } });
+    assignee.append(new Option('Todos os responsáveis', ''), new Option('Sem responsável', '__unassigned__'));
+    for (const user of state.workQueueAssignees) assignee.append(new Option(user.display_name, String(user.id), false, state.workQueueAssignee === String(user.id)));
+    if (state.workQueueAssignee === '__unassigned__') assignee.value = '__unassigned__';
+    assignee.addEventListener('change', () => { state.workQueueAssignee = assignee.value; state.page = 1; loadPage(page); });
+
+    const due = create('select', { attrs: { 'aria-label': 'Filtrar por prazo' } });
+    for (const [value, label] of [['', 'Todos os prazos'], ['ATRASADA', 'Atrasadas'], ['VENCE_HOJE', 'Vencem hoje'], ['NO_PRAZO', 'No prazo'], ['SEM_PRAZO', 'Sem prazo'], ['CONCLUIDA', 'Concluídas']]) {
+      due.append(new Option(label, value, false, state.workQueueDueStatus === value));
+    }
+    due.addEventListener('change', () => { state.workQueueDueStatus = due.value; state.page = 1; loadPage(page); });
+
+    const mine = create('button', { type: 'button', className: 'secondary', text: 'Minhas tarefas' });
+    mine.addEventListener('click', () => {
+      state.workQueueAssignee = String(state.auth?.user?.id || '');
+      state.page = 1;
+      loadPage(page);
+    });
+    actions.prepend(create('div', { className: 'work-queue-filters' }, [priority, assignee, due, mine]));
+  }
   if (page === 'regularization') {
     const sortLabel = create('label', { className: 'queue-sort' }, create('span', { text: 'Ordenar por' }));
     const sortSelect = create('select', { attrs: { 'aria-label': 'Ordenar fila por' } });
@@ -1884,6 +1917,11 @@ function installEvents() {
   });
   $('clear-filters').addEventListener('click', () => {
     for (const id of ['from', 'to', 'center', 'direction', 'status-filter', 'nf-filter', 'lot-filter']) $(id).value = '';
+    if (state.current === 'work_queue') {
+      state.workQueuePriority = '';
+      state.workQueueAssignee = '';
+      state.workQueueDueStatus = '';
+    }
     state.page = 1;
     return state.current === 'dashboard' ? loadDashboard() : loadPage(state.current);
   });

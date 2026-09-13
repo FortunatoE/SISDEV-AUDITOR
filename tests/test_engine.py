@@ -323,7 +323,7 @@ class EngineDatabaseTests(unittest.TestCase):
 
         saved = work_queue.save_work_item(
             document["document_id"], {"allowed_centers": ["0714"]},
-            {"status": "EM_ANALISE", "priority": "ALTA", "due_date": "2026-09-15", "assigned_to": manager["id"]},
+            {"status": "EM_ANALISE", "priority": "ALTA", "due_date": "2999-09-15", "assigned_to": manager["id"]},
             manager["id"], can_manage=True,
         )
         self.assertEqual(saved["status"], "EM_ANALISE")
@@ -336,6 +336,16 @@ class EngineDatabaseTests(unittest.TestCase):
         self.assertEqual(updated["pagination"]["total"], 1)
         self.assertEqual(updated["rows"][0]["responsavel"], "Gestora")
         self.assertEqual(updated["rows"][0]["comentarios"], 1)
+        filtered = work_queue.work_queue_rows({
+            "allowed_centers": ["0714"], "priority": "ALTA",
+            "assigned_to": str(manager["id"]), "due_status": "NO_PRAZO",
+        })
+        self.assertEqual(filtered["pagination"]["total"], 1)
+        exported = work_queue.work_queue_export_rows({
+            "allowed_centers": ["0714"], "status": "EM_ANALISE",
+        })
+        self.assertEqual(exported[0]["Número da NF-e"], "000000123")
+        self.assertEqual(exported[0]["Responsável"], "Gestora")
         comments = work_queue.work_comments(document["document_id"], {"allowed_centers": ["0714"]})
         self.assertEqual(comments[0]["comment"], "Conferência iniciada.")
 
