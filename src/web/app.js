@@ -72,6 +72,7 @@ const state = {
   reconciling: false,
   reconciliation: null,
   reconciliationPollTimer: 0,
+  importHealthTimer: 0,
   auth: null,
   page: 1,
   perPage: 50,
@@ -261,6 +262,7 @@ function normalizeStatus(value, job = {}) {
 
 function statusMeta(status) {
   return {
+    MISSING: { label: 'Arquivo pendente', className: 'empty' },
     QUEUED: { label: 'Aguardando', className: 'queued' },
     PROCESSING: { label: 'Processando', className: 'processing' },
     COMPLETED: { label: 'Concluído', className: 'completed' },
@@ -389,6 +391,94 @@ function renderUploadSummary() {
   reconcileButton.disabled = !allComplete || state.reconciling;
   reconcileButton.textContent = 'Conciliar fontes concluídas';
   reconcileButton.title = allComplete ? 'Executar a conciliação com as fontes concluídas' : 'Conclua todas as fontes antes de conciliar';
+}
+
+function formatDuration(totalSeconds) {
+  const seconds = Math.max(0, asNumber(totalSeconds));
+  if (seconds < 60) return `${Math.round(seconds)} s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours} h ${minutes % 60} min`;
+}
+
+function importSourceTitle(sourceId) {
+  return UPLOAD_SOURCES.find((source) => source.id === sourceId)?.title || formatLabel(sourceId);
+}
+
+function importHealthMetric(label, value, className = '') {
+  return create('article', { className }, [
+    create('small', { text: label }),
+    create('strong', { text: String(value) }),
+  ]);
+}
+
+function renderImportHealth(data) {
+  const summary = data.summary || {};
+  $('import-health-metrics').replaceChildren(
+    importHealthMetric('Ciclo concluído', `${formatNumber(summary.completed)}/${formatNumber(summary.required)}`, 'health-ok'),
+    importHealthMetric('Processando', formatNumber(summary.processing), 'health-running'),
+    importHealthMetric('Aguardando', formatNumber(asNumber(summary.waiting) + asNumber(summary.missing)), 'health-waiting'),
+    importHealthMetric('Com falha', formatNumber(summary.failed), 'health-failed'),
+    importHealthMetric('Prontidão', `${formatNumber(summary.progress_percent)}%`),
+  );
+
+  const alerts = Array.isArray(data.alerts) ? data.alerts : [];
+  $('import-health-alert-list').replaceChildren(...alerts.map((alert) => create('p', { text: alert })));
+  $('import-health-batch').textContent = data.batch?.id
+    ? `Ciclo ${data.batch.id} · ${displayValue('created_at', data.batch.created_at)}`
+    : 'Nenhum ciclo iniciado';
+
+  const body = $('import-health-body');
+  body.replaceChildren();
+  const sources = Array.isArray(data.sources) ? data.sources : [];
+  if (!sources.length) {
+    body.append(create('tr', {}, create('td', { colSpan: 9, text: 'Envie a primeira fonte para iniciar o acompanhamento.' })));
+  } else {
+    for (const source of sources) {
+      const status = String(source.status || 'MISSING');
+      const meta = statusMeta(status);
+      const progress = Math.max(0, Math.min(100, asNumber(source.progress_percent)));
+      const progressCell = create('td', { className: 'health-progress' }, [
+        create('progress', { max: 100, value: progress, attrs: { 'aria-label': `Progresso de ${importSourceTitle(source.source)}` } }),
+        create('small', { text: source.total_rows > 0
+          ? `${formatNumber(source.processed_rows)} / ${formatNumber(source.total_rows)} (${formatNumber(progress)}%)`
+          : `${formatNumber(source.processed_rows)} linha(s)` }),
+      ]);
+      const activity = source.updated_at
+        ? `${displayValue('updated_at', source.updated_at)}${source.stale ? ' · desatualizada' : ''}`
+        : '—';
+      body.append(create('tr', {}, [
+        create('td', {}, [create('strong', { text: importSourceTitle(source.source) }), create('small', { className: 'source-detail', text: source.source_file || 'Arquivo ainda não enviado' })]),
+        create('td', {}, create('span', { className: `job-badge ${meta.className}`, text: source.status_label || meta.label })),
+        progressCell,
+        create('td', { text: formatNumber(source.inserted_rows) }),
+        create('td', { text: formatNumber(source.duplicate_rows) }),
+        create('td', { text: formatNumber(source.error_rows) }),
+        create('td', { text: formatDuration(source.duration_seconds) }),
+        create('td', { className: source.stale ? 'health-stale' : '', text: activity, title: source.last_message || '' }),
+        create('td', { text: source.action_recommended || 'Verificar a fonte.', title: source.error_message || source.last_message || '' }),
+      ]));
+    }
+  }
+
+  window.clearTimeout(state.importHealthTimer);
+  const active = sources.some((source) => ['STARTING', 'PROCESSING'].includes(source.status)
+    || (source.status === 'QUEUED' && source.workflow_run_id));
+  if (state.current === 'import_health' && active) {
+    state.importHealthTimer = window.setTimeout(loadImportHealth, 5_000);
+  }
+}
+
+async function loadImportHealth() {
+  window.clearTimeout(state.importHealthTimer);
+  try {
+    const data = await requestJson('/api/import-health', { method: 'GET' }, 20_000);
+    if (state.current === 'import_health') renderImportHealth(data);
+  } catch (error) {
+    if (state.current !== 'import_health') return;
+    $('import-health-alert-list').replaceChildren(create('p', { className: 'inline-error', text: error.message }));
+  }
 }
 
 function buildUploadArea() {
@@ -1372,9 +1462,11 @@ function setActiveNavigation(page) {
 
 function updateViewVisibility(page) {
   $('uploads-view').hidden = page !== 'uploads';
+  $('import-health-view').hidden = page !== 'import_health';
   $('dashboard-view').hidden = page !== 'dashboard';
-  $('page-view').hidden = page === 'dashboard' || page === 'uploads';
-  $('filters').hidden = page === 'uploads';
+  $('page-view').hidden = ['dashboard', 'uploads', 'import_health'].includes(page);
+  $('filters').hidden = ['uploads', 'import_health'].includes(page);
+  if (page !== 'import_health') window.clearTimeout(state.importHealthTimer);
   if (page !== 'dashboard') $('notice').hidden = true;
 }
 
@@ -1397,7 +1489,7 @@ function configureFilters(page) {
 }
 
 async function navigate(page, updateHistory = true) {
-  const validPage = page === 'dashboard' || page === 'uploads' || PAGE_CONFIG[page] ? page : 'dashboard';
+  const validPage = ['dashboard', 'uploads', 'import_health'].includes(page) || PAGE_CONFIG[page] ? page : 'dashboard';
   state.current = validPage;
   state.page = 1;
   state.sort = '';
@@ -1406,18 +1498,21 @@ async function navigate(page, updateHistory = true) {
   updateViewVisibility(validPage);
   configureFilters(validPage);
   const config = PAGE_CONFIG[validPage];
-  $('title').textContent = validPage === 'dashboard' ? 'Dashboard' : validPage === 'uploads' ? 'Importar arquivos' : config.title;
+  $('title').textContent = validPage === 'dashboard' ? 'Dashboard' : validPage === 'uploads' ? 'Importar arquivos' : validPage === 'import_health' ? 'Saúde das importações' : config.title;
   $('subtitle').textContent = validPage === 'dashboard'
     ? 'Visão geral da auditoria e conciliação de movimentações de químicos'
     : validPage === 'uploads'
       ? 'Fluxo controlado de envio, processamento e conciliação por fonte'
+      : validPage === 'import_health'
+        ? 'Visão operacional do ciclo atual e das fontes que exigem atenção'
       : config.description;
   if (updateHistory && window.location.hash !== `#${validPage}`) history.pushState({ page: validPage }, '', `#${validPage}`);
   if (validPage === 'dashboard') await loadDashboard();
   else if (validPage === 'uploads') {
     renderUploadSummary();
     for (const source of UPLOAD_SOURCES) renderJob(source.id);
-  } else await loadPage(validPage);
+  } else if (validPage === 'import_health') await loadImportHealth();
+  else await loadPage(validPage);
 }
 
 function hasAccess(value) {
@@ -1435,6 +1530,7 @@ function applyAccess() {
     const page = link.dataset.page;
     let allowed = modules.has('*') || modules.has(page);
     if (page === 'uploads') allowed = permissions.has('*') || permissions.has('import');
+    if (page === 'import_health') allowed = permissions.has('*') || permissions.has('import');
     if (page === 'users') allowed = permissions.has('*') || permissions.has('manage_users');
     link.hidden = !allowed;
   }
@@ -1530,6 +1626,8 @@ async function refreshCurrentView() {
     if (state.current === 'uploads') {
       await restoreRemoteJobs();
       renderUploadSummary();
+    } else if (state.current === 'import_health') {
+      await loadImportHealth();
     } else if (state.current === 'dashboard') await loadDashboard();
     else await loadPage(state.current);
   } finally {
@@ -1561,6 +1659,8 @@ function installEvents() {
   });
   $('refresh-data').addEventListener('click', refreshCurrentView);
   $('process-upload').addEventListener('click', reconcileCompleted);
+  $('refresh-import-health').addEventListener('click', loadImportHealth);
+  $('open-uploads').addEventListener('click', () => navigate('uploads'));
   window.addEventListener('popstate', () => navigate(window.location.hash.slice(1) || 'dashboard', false));
 }
 

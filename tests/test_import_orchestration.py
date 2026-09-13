@@ -80,6 +80,47 @@ def test_reconciliation_rejects_incomplete_batch(client):
     assert "sisdev_stock" in body["missing_sources"]
 
 
+def test_import_health_summarizes_current_cycle(client):
+    job_id, batch_id, _run_id = _create_job(status="FAILED", source="agrotis_recipe")
+    connection = database.connect()
+    connection.execute(
+        """UPDATE import_jobs SET processed_rows=6000,total_rows=36807,inserted_rows=5998,
+           duplicate_rows=2,error_rows=1,error_message='Falha de teste' WHERE id=?""",
+        (job_id,),
+    )
+    connection.execute(
+        "INSERT INTO import_job_events(job_id,status,processed_rows,total_rows,message) VALUES (?,?,?,?,?)",
+        (job_id, "FAILED", 6000, 36807, "Último lote confirmado."),
+    )
+    connection.commit()
+    connection.close()
+
+    response = client.get("/api/import-health")
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["batch"]["id"] == batch_id
+    assert body["summary"] == {
+        "required": 8, "completed": 0, "processing": 0, "waiting": 0,
+        "failed": 1, "missing": 7, "progress_percent": 0.0,
+    }
+    recipe = next(row for row in body["sources"] if row["source"] == "agrotis_recipe")
+    assert recipe["processed_rows"] == 6000
+    assert recipe["inserted_rows"] == 5998
+    assert recipe["last_message"] == "Último lote confirmado."
+    assert "retomar" in recipe["action_recommended"]
+
+
+def test_import_health_without_batch_is_actionable(client):
+    response = client.get("/api/import-health")
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["batch"] is None
+    assert body["summary"]["missing"] == 8
+    assert body["alerts"] == ["Nenhum ciclo de importação foi iniciado."]
+
+
 def test_mapping_upsert_and_list(client):
     first = client.post(
         "/api/mappings",

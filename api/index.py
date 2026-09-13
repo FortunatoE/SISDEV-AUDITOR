@@ -144,6 +144,7 @@ ENDPOINT_PERMISSIONS = {
     "upload_data": "import",
     "start_import_job": "import",
     "retry_import_job": "import",
+    "import_health": "import",
     "reconcile_completed_sources": "reconcile",
     "export": "export",
     "list_users": "manage_users",
@@ -366,6 +367,37 @@ def _job_payload(row: Any, *, include_error: bool = True) -> dict[str, Any]:
     if not include_error:
         result.pop("error_message", None)
     return result
+
+
+def _timestamp_utc(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _import_health_action(status: str, *, has_workflow: bool = False) -> str:
+    if status == "MISSING":
+        return "Enviar o arquivo desta fonte."
+    if status == "FAILED":
+        return "Corrigir a causa indicada e retomar do último lote confirmado."
+    if status == "PROCESSING":
+        return "Acompanhar o processamento; o progresso é salvo automaticamente."
+    if status in {"STARTING", "QUEUED"}:
+        return "Aguardar o worker." if has_workflow else "Iniciar o processamento desta fonte."
+    if status == "COMPLETED_WITH_WARNINGS":
+        return "Revisar os alertas antes de executar a conciliação."
+    if status == "COMPLETED":
+        return "Fonte pronta para conciliação."
+    return "Verificar o estado desta fonte."
 
 
 def _batch_payload(row: Any) -> dict[str, Any]:
@@ -1408,6 +1440,99 @@ def latest_import_jobs():
     finally:
         connection.close()
     return jsonify({"batch": _batch_payload(batch), **readiness})
+
+
+@app.get("/api/import-health")
+def import_health():
+    """Operational health of the latest import cycle visible to the caller."""
+
+    connection = connect()
+    try:
+        owner_sql, owner_params = _owner_condition()
+        batch = connection.execute(
+            "SELECT * FROM import_batches WHERE 1=1" + owner_sql + " ORDER BY id DESC LIMIT 1",
+            owner_params,
+        ).fetchone()
+        if batch is None:
+            return jsonify({
+                "batch": None,
+                "summary": {
+                    "required": len(REQUIRED_IMPORT_SOURCES), "completed": 0,
+                    "processing": 0, "waiting": 0, "failed": 0,
+                    "missing": len(REQUIRED_IMPORT_SOURCES), "progress_percent": 0,
+                },
+                "sources": [],
+                "alerts": ["Nenhum ciclo de importação foi iniciado."],
+            })
+
+        latest = _latest_jobs_for_batch(connection, int(batch["id"]))
+        now = datetime.now(timezone.utc)
+        sources: list[dict[str, Any]] = []
+        for source in REQUIRED_IMPORT_SOURCES:
+            job = latest.get(source)
+            if job is None:
+                sources.append({
+                    "source": source, "status": "MISSING", "status_label": "Arquivo pendente",
+                    "processed_rows": 0, "inserted_rows": 0, "duplicate_rows": 0,
+                    "error_rows": 0, "total_rows": 0, "progress_percent": 0,
+                    "duration_seconds": 0, "stale": False,
+                    "action_recommended": _import_health_action("MISSING"),
+                })
+                continue
+
+            payload = _job_payload(job)
+            status = str(job["status"] or "QUEUED")
+            started_at = _timestamp_utc(job.get("started_at") or job.get("created_at"))
+            finished_at = _timestamp_utc(job.get("finished_at"))
+            updated_at = _timestamp_utc(job.get("heartbeat_at") or job.get("updated_at"))
+            duration_end = finished_at or now
+            duration_seconds = max(0, int((duration_end - started_at).total_seconds())) if started_at else 0
+            age_hours = max(0, (now - updated_at).total_seconds() / 3600) if updated_at else None
+            last_event = connection.execute(
+                "SELECT message FROM import_job_events WHERE job_id=? ORDER BY id DESC LIMIT 1",
+                (job["id"],),
+            ).fetchone()
+            payload.update({
+                "duration_seconds": duration_seconds,
+                "last_activity_hours": round(age_hours, 1) if age_hours is not None else None,
+                "stale": bool(status in FINISHED_JOB_STATUSES and age_hours is not None and age_hours >= 24),
+                "last_message": last_event["message"] if last_event else None,
+                "action_recommended": _import_health_action(
+                    status, has_workflow=bool(job.get("workflow_run_id"))
+                ),
+            })
+            sources.append(payload)
+    finally:
+        connection.close()
+
+    completed = sum(item["status"] in FINISHED_JOB_STATUSES for item in sources)
+    processing = sum(item["status"] == "PROCESSING" for item in sources)
+    waiting = sum(item["status"] in {"STARTING", "QUEUED"} for item in sources)
+    failed = sum(item["status"] == "FAILED" for item in sources)
+    missing = sum(item["status"] == "MISSING" for item in sources)
+    alerts = []
+    if failed:
+        alerts.append(f"{failed} fonte(s) exigem nova tentativa.")
+    if missing:
+        alerts.append(f"{missing} fonte(s) ainda não foram enviadas neste ciclo.")
+    stale_count = sum(bool(item.get("stale")) for item in sources)
+    if stale_count:
+        alerts.append(f"{stale_count} fonte(s) foram concluídas há mais de 24 horas.")
+    if not alerts and completed == len(REQUIRED_IMPORT_SOURCES):
+        alerts.append("Todas as fontes estão prontas para conciliação.")
+    elif not alerts:
+        alerts.append("O ciclo está em andamento sem falhas registradas.")
+
+    return jsonify({
+        "batch": _batch_payload(batch),
+        "summary": {
+            "required": len(REQUIRED_IMPORT_SOURCES), "completed": completed,
+            "processing": processing, "waiting": waiting, "failed": failed, "missing": missing,
+            "progress_percent": round(completed * 100 / len(REQUIRED_IMPORT_SOURCES), 1),
+        },
+        "sources": sources,
+        "alerts": alerts,
+    })
 
 
 def _requested_batch(connection: Any, data: dict[str, Any]) -> Any:

@@ -635,6 +635,46 @@ button.danger { background: #8e3037; color: #fff; border-color: #b74b54; }
 .decision-message { display: block; min-height: 18px; margin-top: 8px; color: #a9dbbb; text-align: right; }
 .return-chain .detail-grid { position: relative; }
 
+.import-health-view { display: grid; gap: 12px; }
+.import-health-heading,
+.import-health-table-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.import-health-heading h2,
+.import-health-table-heading h2 { margin: 0 0 5px; }
+.import-health-heading p { margin: 0; color: #9fb6c7; }
+.import-health-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.import-health-metrics {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(140px, 1fr));
+  gap: 10px;
+}
+.import-health-metrics article {
+  min-width: 0;
+  padding: 15px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: linear-gradient(140deg, var(--panel), var(--panel-deep));
+}
+.import-health-metrics small { display: block; color: #9fb5c5; text-transform: uppercase; }
+.import-health-metrics strong { display: block; margin-top: 8px; font-size: 25px; }
+.import-health-metrics .health-ok strong { color: #58d784; }
+.import-health-metrics .health-running strong { color: #62baf0; }
+.import-health-metrics .health-waiting strong { color: #e7ba45; }
+.import-health-metrics .health-failed strong { color: #ff7777; }
+.import-health-alerts p { margin: 0; padding: 8px 0; border-bottom: 1px solid #1e3a50; }
+.import-health-alerts p:last-child { border-bottom: 0; }
+.import-health-table-heading { align-items: center; margin-bottom: 10px; }
+.import-health-table-heading span { color: #8fa8b9; }
+.import-health-table-panel table { min-width: 1120px; }
+.health-progress { min-width: 150px; }
+.health-progress progress { display: block; width: 100%; height: 8px; margin-bottom: 5px; accent-color: var(--green); }
+.health-progress small { color: #9eb3c3; }
+.health-stale { color: #f1bd51; }
+
 @media (max-width: 1500px) {
   .metrics { grid-template-columns: repeat(4, minmax(160px, 1fr)); }
 }
@@ -644,6 +684,7 @@ button.danger { background: #8e3037; color: #fff; border-color: #b74b54; }
   .dashboard-grid { grid-template-columns: 1fr; }
   .dashboard-grid .alerts-panel { grid-column: auto; }
   .lower-grid { grid-template-columns: 1fr; }
+  .import-health-metrics { grid-template-columns: repeat(3, minmax(140px, 1fr)); }
 }
 
 @media (max-width: 900px) {
@@ -665,7 +706,9 @@ button.danger { background: #8e3037; color: #fff; border-color: #b74b54; }
   .filters,
   .upload-list { grid-template-columns: 1fr; }
   .upload-footer,
-  .page-heading-row { align-items: stretch; flex-direction: column; }
+  .page-heading-row,
+  .import-health-heading { align-items: stretch; flex-direction: column; }
+  .import-health-metrics { grid-template-columns: 1fr 1fr; }
   .bars div { grid-template-columns: minmax(120px, 1fr) minmax(80px, 2fr) 38px; }
   .detail-grid { grid-template-columns: 1fr; }
   .detail-dialog { width: calc(100% - 12px); height: calc(100% - 12px); }

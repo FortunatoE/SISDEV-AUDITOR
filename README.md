@@ -28,9 +28,10 @@ Principais melhorias entregues:
 - backup privado de configurações com verificação e restauração administrativa;
 - processamento assíncrono por fonte com Vercel Workflow e progresso persistido no Neon;
 - Fluid Compute habilitado e fontes grandes divididas em etapas duráveis de até 5.000 linhas, com checkpoints internos a cada 1.000 registros;
+- Central de saúde das importações com prontidão do ciclo, falhas, fontes ausentes, duração, última atividade e próxima ação recomendada;
 - classificação preparatória `CANDIDATO_AUTOMACAO` ou `REVISAO_HUMANA`, sem executar ações críticas automaticamente.
 
-Validação local desta versão: **58 testes automatizados aprovados**, incluindo retomada durável de importações, agrupamento por NF/lote, detalhamento sob demanda, validação das receitas escolhidas, autorização, isolamento por centro, ownership de importações e auditoria das decisões.
+Validação local desta versão: **60 testes automatizados aprovados**, incluindo saúde do ciclo, retomada durável de importações, agrupamento por NF/lote, detalhamento sob demanda, validação das receitas escolhidas, autorização, isolamento por centro, ownership de importações e auditoria das decisões.
 
 ### Reforço de segurança desta versão
 
@@ -55,8 +56,9 @@ O relatório técnico detalhado da auditoria é mantido como documento interno e
 5. Cada execução durável avança no máximo 5.000 linhas e grava checkpoints no Neon a cada 1.000 registros.
 6. Se uma execução for interrompida, o Workflow retoma automaticamente do último cursor confirmado, sem duplicar linhas já persistidas.
 7. A interface consulta o job e mostra `Aguardando`, `Processando`, `Concluído`, `Concluído com alertas` ou `Falhou`.
-8. Depois das oito fontes obrigatórias, **Conciliar fontes concluídas** executa a conciliação em uma etapa separada.
-9. Dashboard, páginas e exportações leem somente a execução consolidada no Neon.
+8. A guia **Saúde das importações** consolida a prontidão do ciclo e orienta a próxima ação para cada fonte.
+9. Depois das oito fontes obrigatórias, **Conciliar fontes concluídas** executa a conciliação em uma etapa separada.
+10. Dashboard, páginas e exportações leem somente a execução consolidada no Neon.
 
 O clique HTTP apenas inicia o Workflow. O processamento não fica preso ao tempo da requisição do navegador.
 
@@ -113,6 +115,7 @@ Exemplo: `40 L ÷ 0,06 L/ha = 666,67 ha`.
 - Escopo por centro, unidade e propriedade; administrador possui escopo global.
 - Trilha de auditoria para login, exportação, importação, mapeamentos, usuários, configurações e tratamento de pendências.
 - Histórico de importações, eventos, progresso, alertas e causa amigável de falha.
+- Central operacional do ciclo de importação, atualizada automaticamente enquanto houver worker ativo.
 - Backup privado das configurações, teste de restauração e restauração administrativa confirmada.
 
 ### Regularizar SISDEV — saída

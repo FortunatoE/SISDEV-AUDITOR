@@ -29,6 +29,7 @@
     <nav aria-label="Navegação principal">
       <a class="active" href="#dashboard" data-page="dashboard">⌂ Dashboard</a>
       <a href="#uploads" data-page="uploads">⇧ Importar arquivos</a>
+      <a href="#import_health" data-page="import_health">◌ Saúde das importações</a>
       <a href="#pending" data-page="pending">◉ Pendências</a>
       <a href="#regularization" data-page="regularization">✓ Regularizar SISDEV</a>
       <a href="#analysis" data-page="analysis">▣ Análises</a>
@@ -105,6 +106,36 @@
         <span id="upload-status" role="status" aria-live="polite">Aguardando arquivos.</span>
         <button id="process-upload" type="button">Conciliar fontes concluídas</button>
       </div>
+    </section>
+
+    <section id="import-health-view" hidden class="import-health-view">
+      <div class="import-health-heading">
+        <div>
+          <h2>Central de saúde das importações</h2>
+          <p>Acompanhamento do ciclo atual, falhas, progresso e próxima ação por fonte.</p>
+        </div>
+        <div class="import-health-actions">
+          <button id="open-uploads" type="button" class="secondary">Ir para importação</button>
+          <button id="refresh-import-health" type="button">Atualizar status</button>
+        </div>
+      </div>
+      <section id="import-health-metrics" class="import-health-metrics" aria-label="Resumo do ciclo"></section>
+      <section class="panel import-health-alerts">
+        <h2>Diagnóstico do ciclo</h2>
+        <div id="import-health-alert-list"></div>
+      </section>
+      <section class="panel import-health-table-panel">
+        <div class="import-health-table-heading">
+          <h2>Fontes do ciclo atual</h2>
+          <span id="import-health-batch"></span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Fonte</th><th>Status</th><th>Progresso</th><th>Inseridas</th><th>Duplicadas</th><th>Erros</th><th>Duração</th><th>Última atividade</th><th>Próxima ação</th></tr></thead>
+            <tbody id="import-health-body"></tbody>
+          </table>
+        </div>
+      </section>
     </section>
 
     <div id="dashboard-view">
