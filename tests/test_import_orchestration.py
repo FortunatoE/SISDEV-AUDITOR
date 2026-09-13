@@ -121,6 +121,59 @@ def test_import_health_without_batch_is_actionable(client):
     assert body["alerts"] == ["Nenhum ciclo de importação foi iniciado."]
 
 
+def test_lot_trace_separates_sap_and_sisdev_running_balances(client):
+    engine.RECIPE_CACHE.clear()
+    connection = database.connect()
+    run_id = connection.execute(
+        "INSERT INTO import_runs(status,summary_json) VALUES ('SUCCESS','{}') RETURNING id"
+    ).fetchone()[0]
+    connection.executemany(
+        """INSERT INTO expected_movements(
+               run_id,nf,series,direction,doc_date,sap_material,material_key,lot,
+               manufacturer_lot,quantity,unit,center,cnpj,status
+           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        [
+            (run_id, "000000123", "1", "1", "2026-08-01", "PRODUTO A", "PRODUTO A", "LOTE1", "LOTE1", 100, "L", "1001", "01722958000100", "PENDENTE"),
+            (run_id, "000000124", "1", "2", "2026-08-02", "PRODUTO A", "PRODUTO A", "LOTE1", "LOTE1", 40, "L", "1001", "01722958000100", "PENDENTE"),
+        ],
+    )
+    connection.executemany(
+        """INSERT INTO actual_movements(
+               run_id,nf,series,movement_type,movement_date,product,product_key,lot,
+               quantity,volume,unit,cnpj,status
+           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        [
+            (run_id, "000000123", "1", "entrada", "2026-08-01", "PRODUTO A", "PRODUTO A", "LOTE1", 10, 10, "L", "01722958000100", "LANÇADO"),
+            (run_id, "000000124", "1", "saida", "2026-08-02", "PRODUTO A", "PRODUTO A", "LOTE1", 4, 10, "L", "01722958000100", "LANÇADO"),
+        ],
+    )
+    connection.execute(
+        """INSERT INTO source_records(run_id,source,source_file,row_number,fingerprint,raw_json)
+           VALUES (?,?,?,?,?,?)""",
+        (run_id, "agrotis_recipe", "receitas.xls", 1, "recipe-1", json.dumps({
+            "Data de Emissão": "01/08/2026", "Produto": "PRODUTO A",
+            "Número do receituário": "REC-1", "Nota Fiscal": "123",
+            "Quantidade": 100, "Unidade Quantidade": "L", "Nome RT": "RT TESTE",
+        })),
+    )
+    connection.commit()
+    connection.close()
+
+    options = client.get("/api/lot-trace/options?search=LOTE1").get_json()["options"]
+    assert options == [{"label": "PRODUTO A & LOTE1", "product": "PRODUTO A", "lot": "LOTE1"}]
+
+    response = client.get("/api/lot-trace?product=PRODUTO%20A&lot=LOTE1")
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["summary"] == {
+        "events": 5, "sap_movements": 2, "sisdev_movements": 2,
+        "recipes": 1, "audit_actions": 0,
+    }
+    assert body["events"][-1]["sap_running_balance"] == 60
+    assert body["events"][-1]["sisdev_running_balance"] == 60
+    assert "saldo oficial" in body["balance_note"].lower()
+
+
 def test_mapping_upsert_and_list(client):
     first = client.post(
         "/api/mappings",

@@ -31,6 +31,8 @@ sys.path.insert(0, str(ROOT / "src"))
 from auditor.database import REQUIRED_IMPORT_SOURCES, connect
 from auditor.engine import (
     dashboard_v2,
+    lot_timeline,
+    lot_trace_options,
     page_records_v2,
     regularization_document_detail,
     regularization_export_rows,
@@ -1533,6 +1535,59 @@ def import_health():
         "sources": sources,
         "alerts": alerts,
     })
+
+
+def _lot_trace_authorized() -> bool:
+    modules = set(_current_user().get("modules") or [])
+    return "*" in modules or "lot_trace" in modules
+
+
+@app.get("/api/lot-trace/options")
+def lot_trace_search_options():
+    if not _lot_trace_authorized():
+        return jsonify({"error": "Rastreabilidade de lote não autorizada."}), 403
+    try:
+        filters = _scoped_filters(request.args.to_dict())
+    except PermissionError as error:
+        return jsonify({"error": str(error), "code": "SCOPE_FORBIDDEN"}), 403
+    search = str(request.args.get("search") or "").strip()[:120]
+    options = lot_trace_options(filters, search=search)
+    return jsonify({"options": options, "count": len(options)})
+
+
+@app.get("/api/lot-trace")
+def lot_trace():
+    if not _lot_trace_authorized():
+        return jsonify({"error": "Rastreabilidade de lote não autorizada."}), 403
+    product = str(request.args.get("product") or "").strip()[:200]
+    product_lot = str(request.args.get("lot") or "").strip()[:100]
+    try:
+        filters = _scoped_filters(request.args.to_dict())
+        result = lot_timeline(product, product_lot, filters)
+    except PermissionError as error:
+        return jsonify({"error": str(error), "code": "SCOPE_FORBIDDEN"}), 403
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    try:
+        page_number = max(1, int(request.args.get("page", 1)))
+        per_page = int(request.args.get("per_page", 50))
+    except (TypeError, ValueError):
+        page_number, per_page = 1, 50
+    if per_page not in {25, 50, 100, 250}:
+        per_page = 50
+    events = result.get("events") or []
+    total = len(events)
+    total_pages = (total + per_page - 1) // per_page if total else 0
+    if total_pages and page_number > total_pages:
+        page_number = total_pages
+    offset = (page_number - 1) * per_page
+    result["events"] = events[offset:offset + per_page]
+    result["pagination"] = {
+        "page": page_number, "per_page": per_page, "total": total,
+        "total_pages": total_pages, "from": offset + 1 if total else 0,
+        "to": min(offset + per_page, total),
+    }
+    return jsonify(result)
 
 
 def _requested_batch(connection: Any, data: dict[str, Any]) -> Any:

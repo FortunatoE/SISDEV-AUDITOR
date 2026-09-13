@@ -675,6 +675,40 @@ button.danger { background: #8e3037; color: #fff; border-color: #b74b54; }
 .health-progress small { color: #9eb3c3; }
 .health-stale { color: #f1bd51; }
 
+.lot-trace-view { display: grid; gap: 12px; }
+.lot-trace-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 18px;
+}
+.lot-trace-heading h2 { margin: 0 0 5px; }
+.lot-trace-heading p { margin: 0; color: #9fb6c7; }
+.lot-trace-search { display: flex; align-items: flex-end; gap: 8px; min-width: min(520px, 52%); }
+.lot-trace-search label { flex: 1; color: #aebdcc; font-size: 11px; }
+.lot-trace-search input {
+  display: block;
+  width: 100%;
+  margin-top: 5px;
+  padding: 9px;
+  border: 1px solid #244056;
+  border-radius: 5px;
+  background: #0d2032;
+  color: var(--text);
+}
+.lot-trace-stock { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; }
+.lot-trace-stock article { padding: 12px; border: 1px solid #294b62; border-radius: 6px; background: #0a1d2d; }
+.lot-trace-stock strong { display: block; margin-bottom: 6px; }
+.lot-trace-stock span { display: block; color: #a8bdcc; line-height: 1.55; }
+.lot-trace-table-panel table { min-width: 1280px; }
+.trace-origin { font-weight: 800; }
+.trace-origin.sap { color: #72bdf0; }
+.trace-origin.sisdev { color: #5ed989; }
+.trace-origin.agrotis { color: #d49af3; }
+.trace-origin.auditoria { color: #f0c866; }
+.signed-positive { color: #67dc8e; }
+.signed-negative { color: #ff8585; }
+
 @media (max-width: 1500px) {
   .metrics { grid-template-columns: repeat(4, minmax(160px, 1fr)); }
 }
@@ -708,6 +742,8 @@ button.danger { background: #8e3037; color: #fff; border-color: #b74b54; }
   .upload-footer,
   .page-heading-row,
   .import-health-heading { align-items: stretch; flex-direction: column; }
+  .lot-trace-heading { align-items: stretch; flex-direction: column; }
+  .lot-trace-search { min-width: 0; }
   .import-health-metrics { grid-template-columns: 1fr 1fr; }
   .bars div { grid-template-columns: minmax(120px, 1fr) minmax(80px, 2fr) 38px; }
   .detail-grid { grid-template-columns: 1fr; }

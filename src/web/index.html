@@ -42,6 +42,7 @@
       <label>CADASTROS / DIMENSÕES</label>
       <a href="#materials" data-page="materials">◇ Materiais</a>
       <a href="#lots" data-page="lots">◇ Lotes</a>
+      <a href="#lot_trace" data-page="lot_trace">⌁ Rastreabilidade de lote</a>
       <a href="#units" data-page="units">♟ Unidades</a>
       <a href="#movement_types" data-page="movement_types">⇆ Tipos de Movimento</a>
       <a href="#units_measure" data-page="units_measure">▤ Unidades de Medida</a>
@@ -135,6 +136,41 @@
             <tbody id="import-health-body"></tbody>
           </table>
         </div>
+      </section>
+    </section>
+
+    <section id="lot-trace-view" hidden class="lot-trace-view">
+      <div class="lot-trace-heading">
+        <div>
+          <h2>Linha do tempo do lote</h2>
+          <p>Movimentos SAP e SISDEV, receitas e tratamentos em uma sequência auditável.</p>
+        </div>
+        <div class="lot-trace-search">
+          <label>Produto &amp; lote
+            <input id="lot-trace-search" type="search" list="lot-trace-options" autocomplete="off" placeholder="Digite o produto ou lote">
+            <datalist id="lot-trace-options"></datalist>
+          </label>
+          <button id="search-lot-trace" type="button">Pesquisar</button>
+        </div>
+      </div>
+      <div id="lot-trace-notice" class="notice">Pesquise um produto e lote para montar a rastreabilidade.</div>
+      <section id="lot-trace-metrics" class="import-health-metrics" hidden aria-label="Resumo da rastreabilidade"></section>
+      <section id="lot-trace-stock-panel" class="panel" hidden>
+        <h2>Saldo oficial importado</h2>
+        <div id="lot-trace-stock" class="lot-trace-stock"></div>
+      </section>
+      <section id="lot-trace-table-panel" class="panel lot-trace-table-panel" hidden>
+        <div class="import-health-table-heading">
+          <h2 id="lot-trace-title">Eventos do lote</h2>
+          <span id="lot-trace-note"></span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Data</th><th>Origem</th><th>Evento</th><th>Documento</th><th>Centro</th><th>Quantidade</th><th>Saldo acumulado SAP</th><th>Saldo acumulado SISDEV</th><th>Status</th><th>Detalhes</th></tr></thead>
+            <tbody id="lot-trace-body"></tbody>
+          </table>
+        </div>
+        <div id="lot-trace-pagination" class="pagination" hidden></div>
       </section>
     </section>
 

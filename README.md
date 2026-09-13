@@ -29,9 +29,10 @@ Principais melhorias entregues:
 - processamento assíncrono por fonte com Vercel Workflow e progresso persistido no Neon;
 - Fluid Compute habilitado e fontes grandes divididas em etapas duráveis de até 5.000 linhas, com checkpoints internos a cada 1.000 registros;
 - Central de saúde das importações com prontidão do ciclo, falhas, fontes ausentes, duração, última atividade e próxima ação recomendada;
+- rastreabilidade cronológica por produto e lote, reunindo SAP, SISDEV, receitas e tratamentos com acumulados independentes por sistema e unidade;
 - classificação preparatória `CANDIDATO_AUTOMACAO` ou `REVISAO_HUMANA`, sem executar ações críticas automaticamente.
 
-Validação local desta versão: **60 testes automatizados aprovados**, incluindo saúde do ciclo, retomada durável de importações, agrupamento por NF/lote, detalhamento sob demanda, validação das receitas escolhidas, autorização, isolamento por centro, ownership de importações e auditoria das decisões.
+Validação local desta versão: **61 testes automatizados aprovados**, incluindo saúde do ciclo, linha do tempo por lote, retomada durável de importações, agrupamento por NF/lote, detalhamento sob demanda, validação das receitas escolhidas, autorização, isolamento por centro, ownership de importações e auditoria das decisões.
 
 ### Reforço de segurança desta versão
 
@@ -116,6 +117,7 @@ Exemplo: `40 L ÷ 0,06 L/ha = 666,67 ha`.
 - Trilha de auditoria para login, exportação, importação, mapeamentos, usuários, configurações e tratamento de pendências.
 - Histórico de importações, eventos, progresso, alertas e causa amigável de falha.
 - Central operacional do ciclo de importação, atualizada automaticamente enquanto houver worker ativo.
+- Linha do tempo pesquisável no formato `Produto & Lote`, com documentos SAP, movimentos SISDEV, receitas Agrotis, tratamentos auditados e saldo oficial dos arquivos de estoque.
 - Backup privado das configurações, teste de restauração e restauração administrativa confirmada.
 
 ### Regularizar SISDEV — saída

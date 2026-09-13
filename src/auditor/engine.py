@@ -2075,6 +2075,238 @@ def _stock_rows(conn, run_id):
     return sorted(rows, key=lambda row: (row["centro"], key(row["material"]), row["lote_fabricante"]))
 
 
+def _trace_product_aliases(conn, product):
+    aliases = {key(product)} if text(product) else set()
+    mappings = [
+        (key(row["source_value"]), key(row["target_value"]))
+        for row in conn.execute(
+            """SELECT source_value,target_value FROM reconciliation_mappings
+               WHERE mapping_type='material_product' AND status='ACTIVE'"""
+        )
+    ]
+    changed = True
+    while changed:
+        changed = False
+        for source_value, target_value in mappings:
+            if source_value in aliases or target_value in aliases:
+                before = len(aliases)
+                aliases.update((source_value, target_value))
+                changed = changed or len(aliases) != before
+    return aliases
+
+
+def lot_trace_options(filters=None, search="", limit=200):
+    """Return searchable product/lot pairs from the latest consolidated run."""
+
+    filters = filters or {}
+    conn = connect()
+    run = _latest_success(conn)
+    if not run:
+        conn.close()
+        return []
+    run_id = run["id"]
+    requested_center = text(filters.get("center"))
+    allowed_centers = filters.get("allowed_centers")
+    allowed = {text(value) for value in allowed_centers or []}
+    pairs = {}
+
+    for row in conn.execute(
+        """SELECT sap_material product,lot,manufacturer_lot,center
+           FROM expected_movements WHERE run_id=?""",
+        (run_id,),
+    ):
+        center = text(row["center"])
+        if allowed_centers is not None and center not in allowed:
+            continue
+        if requested_center and center != requested_center:
+            continue
+        product_lot = lot(row["manufacturer_lot"] or row["lot"])
+        if text(row["product"]) and product_lot:
+            pairs.setdefault((key(row["product"]), product_lot), (text(row["product"]), product_lot))
+
+    center_by_cnpj = _center_by_cnpj(conn, run_id)
+    for row in conn.execute(
+        "SELECT product,lot,cnpj FROM actual_movements WHERE run_id=?",
+        (run_id,),
+    ):
+        center = center_by_cnpj.get(identifier(row["cnpj"]), center_by_cnpj.get("", ""))
+        if allowed_centers is not None and center not in allowed:
+            continue
+        if requested_center and center != requested_center:
+            continue
+        product_lot = lot(row["lot"])
+        if text(row["product"]) and product_lot:
+            pairs.setdefault((key(row["product"]), product_lot), (text(row["product"]), product_lot))
+
+    needle = key(search)
+    options = [
+        {"label": f"{product} & {product_lot}", "product": product, "lot": product_lot}
+        for product, product_lot in pairs.values()
+        if not needle or needle in key(f"{product} {product_lot}")
+    ]
+    conn.close()
+    return sorted(options, key=lambda item: key(item["label"]))[:max(1, min(int(limit or 200), 500))]
+
+
+def lot_timeline(product, product_lot, filters=None):
+    """Build an explainable SAP/SISDEV/Agrotis timeline for one lot.
+
+    Running balances are deliberately separated by system and represent only
+    imported movements. Official snapshot balances come from the stock files.
+    """
+
+    filters = filters or {}
+    selected_lot = lot(product_lot)
+    if not selected_lot:
+        raise ValueError("Informe o lote para consultar a rastreabilidade.")
+    conn = connect()
+    run = _latest_success(conn)
+    if not run:
+        conn.close()
+        return {"ready": False, "events": [], "stock": [], "summary": {}}
+    run_id = run["id"]
+    aliases = _trace_product_aliases(conn, product)
+    requested_center = text(filters.get("center"))
+    allowed_centers = filters.get("allowed_centers")
+    allowed = {text(value) for value in allowed_centers or []}
+
+    def product_matches(value):
+        return not aliases or key(value) in aliases
+
+    def center_allowed(value):
+        value = text(value)
+        if allowed_centers is not None and value not in allowed:
+            return False
+        return not requested_center or value == requested_center
+
+    expected = []
+    for row in conn.execute("SELECT * FROM expected_movements WHERE run_id=?", (run_id,)):
+        preferred_lot = lot(row["manufacturer_lot"] or row["lot"])
+        if preferred_lot == selected_lot and product_matches(row["sap_material"]) and center_allowed(row["center"]):
+            expected.append(dict(row))
+
+    center_by_cnpj = _center_by_cnpj(conn, run_id)
+    actual = []
+    for row in conn.execute("SELECT * FROM actual_movements WHERE run_id=?", (run_id,)):
+        center = center_by_cnpj.get(identifier(row["cnpj"]), center_by_cnpj.get("", ""))
+        if lot(row["lot"]) == selected_lot and product_matches(row["product"]) and center_allowed(center):
+            item = dict(row)
+            item["center"] = center
+            actual.append(item)
+
+    expected_ids = {row["id"] for row in expected}
+    actual_ids = {row["id"] for row in actual}
+    reconciliation_by_expected = {}
+    reconciliation_by_actual = {}
+    for row in conn.execute("SELECT * FROM reconciliations WHERE run_id=? ORDER BY id DESC", (run_id,)):
+        item = dict(row)
+        if row["expected_id"] in expected_ids:
+            reconciliation_by_expected.setdefault(row["expected_id"], item)
+        if row["actual_id"] in actual_ids:
+            reconciliation_by_actual.setdefault(row["actual_id"], item)
+
+    events = []
+    selected_documents = {document(row["nf"]) for row in expected if row.get("nf")}
+    for row in expected:
+        raw_direction = text(row["direction"])
+        direction = raw_direction if raw_direction in {"1", "2"} else _movement_direction(raw_direction)
+        quantity = abs(number(row["quantity"]) or 0)
+        signed = quantity if direction == "1" else -quantity if direction == "2" else 0
+        reconciliation = reconciliation_by_expected.get(row["id"], {})
+        events.append({
+            "date": iso_date(row["doc_date"]), "origin": "SAP", "event_type": "Entrada" if direction == "1" else "Saída" if direction == "2" else "Movimento",
+            "document": row["nf"], "series": row["series"], "center": row["center"],
+            "product": row["sap_material"], "lot": row["manufacturer_lot"] or row["lot"],
+            "quantity": quantity, "signed_quantity": signed, "unit": row["unit"],
+            "status": reconciliation.get("status") or row.get("status"),
+            "details": reconciliation.get("diagnosis") or "Movimento esperado importado do SAP.",
+        })
+    for row in actual:
+        direction = _movement_direction(row["movement_type"])
+        quantity = abs((number(row["quantity"]) or 0) * (number(row["volume"]) or 0))
+        signed = quantity if direction == "1" else -quantity if direction == "2" else 0
+        reconciliation = reconciliation_by_actual.get(row["id"], {})
+        events.append({
+            "date": iso_date(row["movement_date"]), "origin": "SISDEV", "event_type": "Entrada" if direction == "1" else "Saída" if direction == "2" else text(row["movement_type"]) or "Movimento",
+            "document": row["nf"], "series": row["series"], "center": row["center"],
+            "product": row["product"], "lot": row["lot"], "quantity": quantity,
+            "signed_quantity": signed, "unit": row["unit"], "status": reconciliation.get("status") or row.get("status"),
+            "details": reconciliation.get("diagnosis") or "Movimento efetivamente localizado no SISDEV.",
+        })
+
+    allowed_properties = filters.get("allowed_properties")
+    properties = {key(value) for value in allowed_properties or []}
+    for recipe in _recipes_for_regularization(conn, run_id):
+        recipe_lot = lot(recipe.get("lote"))
+        same_document = recipe.get("nota_fiscal") and document(recipe["nota_fiscal"]) in selected_documents
+        if not product_matches(recipe.get("produto") or recipe.get("material")):
+            continue
+        if recipe_lot != selected_lot and not (not recipe_lot and same_document):
+            continue
+        if allowed_properties is not None and key(recipe.get("nome_propriedade")) not in properties:
+            continue
+        events.append({
+            "date": iso_date(recipe.get("data_emissao")), "origin": "AGROTIS", "event_type": "Receita",
+            "document": recipe.get("numero_receita"), "series": "", "center": "",
+            "product": recipe.get("produto"), "lot": recipe_lot or selected_lot,
+            "quantity": recipe.get("quantidade_receita"), "signed_quantity": 0,
+            "unit": recipe.get("unidade_receita"), "status": "INFORMATIVO",
+            "details": f"RT: {recipe.get('nome_rt') or 'Não informado'} · Propriedade: {recipe.get('nome_propriedade') or 'Não informada'}",
+        })
+
+    if expected_ids:
+        placeholders = ",".join("?" for _ in expected_ids)
+        for action in conn.execute(
+            f"""SELECT h.*,e.nf,e.series,e.sap_material,e.manufacturer_lot,e.lot,e.center
+                FROM action_history h JOIN reconciliations r ON r.id=h.reconciliation_id
+                JOIN expected_movements e ON e.id=r.expected_id
+                WHERE e.id IN ({placeholders}) ORDER BY h.created_at""",
+            list(expected_ids),
+        ):
+            events.append({
+                "date": iso_date(action["created_at"]), "origin": "AUDITORIA", "event_type": text(action["action"]) or "Tratamento",
+                "document": action["nf"], "series": action["series"], "center": action["center"],
+                "product": action["sap_material"], "lot": action["manufacturer_lot"] or action["lot"],
+                "quantity": None, "signed_quantity": 0, "unit": "", "status": "REGISTRADO",
+                "details": f"{text(action['reason']) or 'Sem justificativa'} · Usuário: {text(action['user_name']) or 'Não informado'}",
+            })
+
+    origin_order = {"SAP": 0, "SISDEV": 1, "AGROTIS": 2, "AUDITORIA": 3}
+    events.sort(key=lambda item: (item["date"] or "9999-12-31", origin_order.get(item["origin"], 9), text(item["document"])))
+    measures = {unit(event.get("unit")) for event in events if unit(event.get("unit"))}
+    default_measure = next(iter(measures)) if len(measures) == 1 else ""
+    sap_balances = defaultdict(float)
+    sisdev_balances = defaultdict(float)
+    for event in events:
+        measure = unit(event.get("unit")) or default_measure
+        if event["origin"] == "SAP":
+            sap_balances[measure] += event["signed_quantity"]
+        elif event["origin"] == "SISDEV":
+            sisdev_balances[measure] += event["signed_quantity"]
+        event["balance_unit"] = measure
+        event["sap_running_balance"] = round(sap_balances[measure], 6)
+        event["sisdev_running_balance"] = round(sisdev_balances[measure], 6)
+
+    stock = [
+        row for row in _stock_rows(conn, run_id)
+        if lot(row.get("lote_fabricante") or row.get("lote")) == selected_lot
+        and product_matches(row.get("material")) and center_allowed(row.get("centro"))
+    ]
+    conn.close()
+    display_product = text(product) or next((event["product"] for event in events if event.get("product")), "")
+    return {
+        "ready": True, "run": dict(run), "product": display_product, "lot": selected_lot,
+        "events": events, "stock": stock,
+        "summary": {
+            "events": len(events), "sap_movements": sum(event["origin"] == "SAP" for event in events),
+            "sisdev_movements": sum(event["origin"] == "SISDEV" for event in events),
+            "recipes": sum(event["origin"] == "AGROTIS" for event in events),
+            "audit_actions": sum(event["origin"] == "AUDITORIA" for event in events),
+        },
+        "balance_note": "Os acumulados representam somente os movimentos importados. O saldo oficial é o exibido no quadro de estoque.",
+    }
+
+
 def validation_rows(limit=None, filters=None):
     conn = connect()
     run = _latest_success(conn)

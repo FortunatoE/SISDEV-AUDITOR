@@ -81,6 +81,9 @@ const state = {
   appInitialized: false,
   editingUserId: null,
   regularizationLotOptions: new Map(),
+  lotTraceOptions: new Map(),
+  lotTraceSelection: null,
+  lotTraceSearchTimer: 0,
 };
 
 class ApiError extends Error {
@@ -478,6 +481,135 @@ async function loadImportHealth() {
   } catch (error) {
     if (state.current !== 'import_health') return;
     $('import-health-alert-list').replaceChildren(create('p', { className: 'inline-error', text: error.message }));
+  }
+}
+
+function populateLotTraceOptions(options = []) {
+  const list = $('lot-trace-options');
+  state.lotTraceOptions = new Map();
+  list.replaceChildren();
+  for (const option of options) {
+    const label = String(option.label || '');
+    state.lotTraceOptions.set(label.toLocaleUpperCase('pt-BR'), {
+      product: String(option.product || ''), lot: String(option.lot || ''),
+    });
+    list.append(new Option(label, label));
+  }
+}
+
+async function loadLotTraceOptions(search = '') {
+  try {
+    const data = await requestJson(`/api/lot-trace/options?search=${encodeURIComponent(search)}`, { method: 'GET' }, 20_000);
+    if (state.current === 'lot_trace') populateLotTraceOptions(data.options || []);
+  } catch (error) {
+    if (state.current === 'lot_trace') $('lot-trace-notice').textContent = error.message;
+  }
+}
+
+function selectedLotTrace() {
+  const value = $('lot-trace-search').value.trim();
+  const exact = state.lotTraceOptions.get(value.toLocaleUpperCase('pt-BR'));
+  if (exact) return exact;
+  const separator = value.lastIndexOf('&');
+  if (separator >= 0) {
+    return { product: value.slice(0, separator).trim(), lot: value.slice(separator + 1).trim() };
+  }
+  return { product: '', lot: value };
+}
+
+function renderLotTracePagination(pagination) {
+  const container = $('lot-trace-pagination');
+  container.replaceChildren();
+  if (!pagination || pagination.total <= pagination.per_page) {
+    container.hidden = true;
+    return;
+  }
+  container.hidden = false;
+  const label = create('span', { text: `Mostrando ${formatNumber(pagination.from)}–${formatNumber(pagination.to)} de ${formatNumber(pagination.total)} eventos` });
+  const size = create('select', { attrs: { 'aria-label': 'Eventos por página' } });
+  for (const value of [25, 50, 100, 250]) size.append(new Option(`${value} por página`, String(value), false, Number(pagination.per_page) === value));
+  size.addEventListener('change', () => { state.perPage = Number(size.value); state.page = 1; searchLotTrace(false); });
+  const previous = create('button', { type: 'button', className: 'secondary', text: 'Anterior', disabled: pagination.page <= 1 });
+  const next = create('button', { type: 'button', className: 'secondary', text: 'Próxima', disabled: pagination.page >= pagination.total_pages });
+  previous.addEventListener('click', () => { state.page = Math.max(1, pagination.page - 1); searchLotTrace(false); });
+  next.addEventListener('click', () => { state.page = pagination.page + 1; searchLotTrace(false); });
+  container.append(label, create('div', { className: 'pagination-controls' }, [
+    size, previous, create('span', { text: `Página ${pagination.page} de ${pagination.total_pages}` }), next,
+  ]));
+}
+
+function renderLotTrace(data) {
+  const summary = data.summary || {};
+  $('lot-trace-notice').textContent = data.balance_note || '';
+  $('lot-trace-metrics').hidden = false;
+  $('lot-trace-metrics').replaceChildren(
+    importHealthMetric('Eventos', formatNumber(summary.events)),
+    importHealthMetric('Movimentos SAP', formatNumber(summary.sap_movements), 'health-running'),
+    importHealthMetric('Movimentos SISDEV', formatNumber(summary.sisdev_movements), 'health-ok'),
+    importHealthMetric('Receitas', formatNumber(summary.recipes)),
+    importHealthMetric('Tratamentos', formatNumber(summary.audit_actions), 'health-waiting'),
+  );
+
+  const stock = Array.isArray(data.stock) ? data.stock : [];
+  $('lot-trace-stock-panel').hidden = false;
+  $('lot-trace-stock').replaceChildren(...(stock.length ? stock.map((row) =>
+    create('article', {}, [
+      create('strong', { text: `${row.centro || 'Centro não identificado'} · ${row.material || data.product}` }),
+      create('span', { text: `SAP: ${formatNumber(row.quantidade_sap)} ${row.unidade || ''}` }),
+      create('span', { text: `SISDEV: ${formatNumber(row.quantidade_sisdev)} ${row.unidade || ''}` }),
+      create('span', { text: `Diferença: ${formatNumber(row.diferenca_sisdev_menos_sap)} ${row.unidade || ''}` }),
+    ])
+  ) : [create('p', { text: 'Nenhum saldo oficial correspondente foi localizado nos arquivos de estoque.' })]));
+
+  $('lot-trace-table-panel').hidden = false;
+  $('lot-trace-title').textContent = `${data.product || 'Produto'} & ${data.lot}`;
+  $('lot-trace-note').textContent = `Execução ${data.run?.id || '—'}`;
+  const body = $('lot-trace-body');
+  body.replaceChildren();
+  const events = Array.isArray(data.events) ? data.events : [];
+  if (!events.length) {
+    body.append(create('tr', {}, create('td', { colSpan: 10, text: 'Nenhum movimento ou documento relacionado foi localizado.' })));
+  } else {
+    for (const event of events) {
+      const signed = asNumber(event.signed_quantity);
+      const quantityText = event.quantity === null || event.quantity === undefined
+        ? '—'
+        : `${signed > 0 ? '+' : signed < 0 ? '−' : ''}${formatNumber(Math.abs(signed || asNumber(event.quantity)))} ${event.unit || ''}`;
+      body.append(create('tr', {}, [
+        create('td', { text: displayValue('date', event.date) }),
+        create('td', {}, create('span', { className: `trace-origin ${String(event.origin || '').toLowerCase()}`, text: event.origin })),
+        create('td', { text: event.event_type || 'Movimento' }),
+        create('td', { text: `${event.document || '—'}${event.series ? ` · Série ${event.series}` : ''}` }),
+        create('td', { text: event.center || '—' }),
+        create('td', { className: signed > 0 ? 'signed-positive' : signed < 0 ? 'signed-negative' : '', text: quantityText }),
+        create('td', { text: `${formatNumber(event.sap_running_balance)} ${event.balance_unit || ''}` }),
+        create('td', { text: `${formatNumber(event.sisdev_running_balance)} ${event.balance_unit || ''}` }),
+        create('td', {}, create('span', { className: `tag ${recordStatusClass(event.status)}`.trim(), text: event.status || '—' })),
+        create('td', { text: event.details || '—', title: event.details || '' }),
+      ]));
+    }
+  }
+  renderLotTracePagination(data.pagination);
+}
+
+async function searchLotTrace(resetPage = true) {
+  const selection = selectedLotTrace();
+  if (!selection.lot) {
+    $('lot-trace-notice').textContent = 'Digite ou selecione um lote para pesquisar.';
+    return;
+  }
+  if (resetPage) state.page = 1;
+  state.lotTraceSelection = selection;
+  $('lot-trace-notice').textContent = 'Montando a linha do tempo do lote...';
+  try {
+    const params = new URLSearchParams({
+      product: selection.product, lot: selection.lot,
+      page: String(state.page), per_page: String(state.perPage),
+    });
+    const data = await requestJson(`/api/lot-trace?${params}`, { method: 'GET' }, 45_000);
+    if (state.current === 'lot_trace') renderLotTrace(data);
+  } catch (error) {
+    if (state.current === 'lot_trace') $('lot-trace-notice').textContent = error.message;
   }
 }
 
@@ -1463,9 +1595,10 @@ function setActiveNavigation(page) {
 function updateViewVisibility(page) {
   $('uploads-view').hidden = page !== 'uploads';
   $('import-health-view').hidden = page !== 'import_health';
+  $('lot-trace-view').hidden = page !== 'lot_trace';
   $('dashboard-view').hidden = page !== 'dashboard';
-  $('page-view').hidden = ['dashboard', 'uploads', 'import_health'].includes(page);
-  $('filters').hidden = ['uploads', 'import_health'].includes(page);
+  $('page-view').hidden = ['dashboard', 'uploads', 'import_health', 'lot_trace'].includes(page);
+  $('filters').hidden = ['uploads', 'import_health', 'lot_trace'].includes(page);
   if (page !== 'import_health') window.clearTimeout(state.importHealthTimer);
   if (page !== 'dashboard') $('notice').hidden = true;
 }
@@ -1489,7 +1622,7 @@ function configureFilters(page) {
 }
 
 async function navigate(page, updateHistory = true) {
-  const validPage = ['dashboard', 'uploads', 'import_health'].includes(page) || PAGE_CONFIG[page] ? page : 'dashboard';
+  const validPage = ['dashboard', 'uploads', 'import_health', 'lot_trace'].includes(page) || PAGE_CONFIG[page] ? page : 'dashboard';
   state.current = validPage;
   state.page = 1;
   state.sort = '';
@@ -1498,13 +1631,15 @@ async function navigate(page, updateHistory = true) {
   updateViewVisibility(validPage);
   configureFilters(validPage);
   const config = PAGE_CONFIG[validPage];
-  $('title').textContent = validPage === 'dashboard' ? 'Dashboard' : validPage === 'uploads' ? 'Importar arquivos' : validPage === 'import_health' ? 'Saúde das importações' : config.title;
+  $('title').textContent = validPage === 'dashboard' ? 'Dashboard' : validPage === 'uploads' ? 'Importar arquivos' : validPage === 'import_health' ? 'Saúde das importações' : validPage === 'lot_trace' ? 'Rastreabilidade de lote' : config.title;
   $('subtitle').textContent = validPage === 'dashboard'
     ? 'Visão geral da auditoria e conciliação de movimentações de químicos'
     : validPage === 'uploads'
       ? 'Fluxo controlado de envio, processamento e conciliação por fonte'
       : validPage === 'import_health'
         ? 'Visão operacional do ciclo atual e das fontes que exigem atenção'
+      : validPage === 'lot_trace'
+        ? 'Linha cronológica de documentos e movimentos por produto e lote'
       : config.description;
   if (updateHistory && window.location.hash !== `#${validPage}`) history.pushState({ page: validPage }, '', `#${validPage}`);
   if (validPage === 'dashboard') await loadDashboard();
@@ -1512,6 +1647,10 @@ async function navigate(page, updateHistory = true) {
     renderUploadSummary();
     for (const source of UPLOAD_SOURCES) renderJob(source.id);
   } else if (validPage === 'import_health') await loadImportHealth();
+  else if (validPage === 'lot_trace') {
+    await loadLotTraceOptions($('lot-trace-search').value.trim());
+    if (state.lotTraceSelection) await searchLotTrace(false);
+  }
   else await loadPage(validPage);
 }
 
@@ -1628,6 +1767,8 @@ async function refreshCurrentView() {
       renderUploadSummary();
     } else if (state.current === 'import_health') {
       await loadImportHealth();
+    } else if (state.current === 'lot_trace') {
+      await searchLotTrace(false);
     } else if (state.current === 'dashboard') await loadDashboard();
     else await loadPage(state.current);
   } finally {
@@ -1661,6 +1802,14 @@ function installEvents() {
   $('process-upload').addEventListener('click', reconcileCompleted);
   $('refresh-import-health').addEventListener('click', loadImportHealth);
   $('open-uploads').addEventListener('click', () => navigate('uploads'));
+  $('search-lot-trace').addEventListener('click', () => searchLotTrace(true));
+  $('lot-trace-search').addEventListener('input', () => {
+    window.clearTimeout(state.lotTraceSearchTimer);
+    state.lotTraceSearchTimer = window.setTimeout(() => loadLotTraceOptions($('lot-trace-search').value.trim()), 250);
+  });
+  $('lot-trace-search').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') { event.preventDefault(); searchLotTrace(true); }
+  });
   window.addEventListener('popstate', () => navigate(window.location.hash.slice(1) || 'dashboard', false));
 }
 

@@ -43,10 +43,10 @@ PROFILE_PERMISSIONS: dict[str, set[str]] = {
 
 PROFILE_MODULES: dict[str, set[str]] = {
     "ADMINISTRADOR": {"*"},
-    "GESTOR": {"dashboard", "pending", "regularization", "analysis", "invoices", "recipes", "movements", "stocks", "reports", "history"},
-    "AUDITOR": {"dashboard", "pending", "regularization", "analysis", "recipes", "materials", "lots", "rules", "reports", "history", "logs"},
-    "OPERADOR": {"dashboard", "pending", "regularization", "invoices", "recipes", "stocks"},
-    "CONSULTA": {"dashboard", "pending", "analysis", "invoices", "recipes", "movements", "stocks", "reports"},
+    "GESTOR": {"dashboard", "pending", "regularization", "analysis", "invoices", "recipes", "movements", "stocks", "lot_trace", "reports", "history"},
+    "AUDITOR": {"dashboard", "pending", "regularization", "analysis", "recipes", "materials", "lots", "lot_trace", "rules", "reports", "history", "logs"},
+    "OPERADOR": {"dashboard", "pending", "regularization", "invoices", "recipes", "stocks", "lot_trace"},
+    "CONSULTA": {"dashboard", "pending", "analysis", "invoices", "recipes", "movements", "stocks", "lot_trace", "reports"},
 }
 
 
