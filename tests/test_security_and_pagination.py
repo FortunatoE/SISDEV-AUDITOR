@@ -630,3 +630,60 @@ def test_return_decision_accepts_multiple_related_movements(secure_client, monke
     )
     assert confirmed.status_code == 200
     assert confirmed.get_json()["decision"]["selected_ids"] == ["20", "21"]
+
+
+def test_work_queue_updates_are_persistent_and_center_scoped(secure_client, monkeypatch):
+    manager = create_user(
+        "queue-manager@example.com", "Gestora da fila", "Senha-segura-123", "GESTOR",
+        scopes=[("CENTER", "0714")],
+    )
+    create_user(
+        "queue-outsider@example.com", "Operador externo", "Senha-segura-123", "OPERADOR",
+        scopes=[("CENTER", "9999")],
+    )
+    source_path = Path(database.DB_PATH).parent / "queue-source.xlsx"
+    source_path.touch()
+    source_row = {
+        "Número de nota fiscal eletrônica": 456,
+        "Séries": 1,
+        "Data documento": "12/09/2026",
+        "Texto breve material": "PRODUTO FILA",
+        "Lote": "LOTE-FILA",
+        "Lote Fabricante": "FAB-FILA",
+        "Quantidade": 20,
+        "UMB": "L",
+        "Centro": "0714",
+        "CNPJ": "01.722.958/0014-73",
+    }
+    run_id = engine.create_import_run()
+    monkeypatch.setattr(engine, "_read_source", lambda *_args: [(2, source_row)])
+    engine.import_source(run_id, "sap_exit_current", source_path)
+    engine.reconcile_run(run_id, require_complete=False)
+
+    login, csrf = _login(secure_client, manager["email"], "Senha-segura-123")
+    assert login.status_code == 200
+    queue = secure_client.get("/api/work-items").get_json()
+    document_id = queue["rows"][0]["document_id"]
+    updated = secure_client.patch(
+        f"/api/work-items/{document_id}", headers={"X-CSRF-Token": csrf},
+        json={
+            "status": "EM_ANALISE", "priority": "ALTA",
+            "due_date": "2026-09-15", "assigned_to": manager["id"],
+        },
+    )
+    assert updated.status_code == 200
+    commented = secure_client.post(
+        f"/api/work-items/{document_id}/comments", headers={"X-CSRF-Token": csrf},
+        json={"comment": "Tratamento iniciado."},
+    )
+    assert commented.status_code == 201
+    secure_client.post("/api/auth/logout", headers={"X-CSRF-Token": csrf})
+
+    _outsider_login, outsider_csrf = _login(
+        secure_client, "queue-outsider@example.com", "Senha-segura-123",
+    )
+    forbidden = secure_client.patch(
+        f"/api/work-items/{document_id}", headers={"X-CSRF-Token": outsider_csrf},
+        json={"status": "REGULARIZADA"},
+    )
+    assert forbidden.status_code == 404

@@ -31,6 +31,7 @@
       <a href="#uploads" data-page="uploads">⇧ Importar arquivos</a>
       <a href="#import_health" data-page="import_health">◌ Saúde das importações</a>
       <a href="#pending" data-page="pending">◉ Pendências</a>
+      <a href="#work_queue" data-page="work_queue">☑ Fila de trabalho</a>
       <a href="#regularization" data-page="regularization">✓ Regularizar SISDEV</a>
       <a href="#analysis" data-page="analysis">▣ Análises</a>
       <a href="#invoices" data-page="invoices">▤ Notas Fiscais</a>
@@ -274,6 +275,34 @@
       </header>
       <div id="regularization-detail-content" class="detail-dialog-content"></div>
     </div>
+  </dialog>
+
+  <dialog id="work-item-dialog" class="work-item-dialog">
+    <form id="work-item-form" method="dialog" class="user-form">
+      <h2 id="work-item-title">Tratar tarefa</h2>
+      <p id="work-item-context" class="work-item-context"></p>
+      <label>Andamento
+        <select id="work-item-status">
+          <option value="NOVA">Nova</option>
+          <option value="EM_ANALISE">Em análise</option>
+          <option value="AGUARDANDO_INFORMACAO">Aguardando informação</option>
+          <option value="REGULARIZADA">Regularizada</option>
+          <option value="VALIDADA">Validada</option>
+        </select>
+      </label>
+      <label id="work-assignee-label">Responsável <select id="work-item-assignee"></select></label>
+      <label id="work-priority-label">Prioridade
+        <select id="work-item-priority"><option>ALTA</option><option>MEDIA</option><option>BAIXA</option></select>
+      </label>
+      <label id="work-due-label">Prazo <input id="work-item-due" type="date"></label>
+      <label>Novo comentário <textarea id="work-item-comment" rows="3" maxlength="2000" placeholder="Registre o andamento, a evidência ou o próximo passo"></textarea></label>
+      <section class="work-comment-history">
+        <strong>Histórico de comentários</strong>
+        <div id="work-comments"></div>
+      </section>
+      <p id="work-item-message" class="login-message" role="alert"></p>
+      <div class="dialog-actions"><button type="button" id="cancel-work-item" class="secondary">Cancelar</button><button id="save-work-item" type="submit">Salvar tarefa</button></div>
+    </form>
   </dialog>
 
   <script src="app.js" defer></script>

@@ -56,6 +56,13 @@ from auditor.security import (
     scope_values,
     validate_session,
 )
+from auditor.work_queue import (
+    active_assignees,
+    add_work_comment,
+    save_work_item,
+    work_comments,
+    work_queue_rows,
+)
 
 
 STATIC = ROOT / "src" / "web"
@@ -158,6 +165,8 @@ ENDPOINT_PERMISSIONS = {
     "restore_backup": "manage_backup",
     "record_pending_action": "treat_pending",
     "record_regularization_decision": "treat_pending",
+    "update_work_item": "treat_pending",
+    "create_work_comment": "treat_pending",
 }
 
 
@@ -258,8 +267,16 @@ def _scoped_filters(values: dict[str, Any]) -> dict[str, Any]:
     requested_center = str(result.get("center") or "").strip()
     if requested_center and requested_center not in centers:
         raise PermissionError("Centro fora do escopo autorizado.")
-    result["allowed_centers"] = centers
-    result["allowed_properties"] = properties
+    # Escopos do mesmo usuário são alternativas de autorização. A ausência de
+    # um tipo não pode apagar registros já autorizados por outro tipo; somente
+    # usuários sem qualquer escopo permanecem sem acesso a dados operacionais.
+    if centers:
+        result["allowed_centers"] = centers
+    if properties:
+        result["allowed_properties"] = properties
+    if not centers and not properties:
+        result["allowed_centers"] = []
+        result["allowed_properties"] = []
     result["actor_user_id"] = int(user["id"])
     return result
 
@@ -1023,6 +1040,82 @@ def regularization_detail(document_id: str):
         critical=False,
     )
     return jsonify(detail)
+
+
+@app.get("/api/work-items")
+def list_work_items():
+    if "work_queue" not in set(_current_user().get("modules") or []) and "*" not in set(_current_user().get("modules") or []):
+        return jsonify({"error": "Fila de trabalho não autorizada para este perfil."}), 403
+    try:
+        filters = _scoped_filters(request.args.to_dict())
+    except PermissionError as error:
+        return jsonify({"error": str(error), "code": "SCOPE_FORBIDDEN"}), 403
+    payload = work_queue_rows(filters)
+    if has_permission(_current_user(), "manage_work_queue"):
+        payload["assignees"] = active_assignees()
+    else:
+        payload["assignees"] = [{
+            "id": _current_user()["id"],
+            "display_name": _current_user()["display_name"],
+            "profile": _current_user()["profile"],
+        }]
+    return jsonify(payload)
+
+
+@app.patch("/api/work-items/<document_id>")
+def update_work_item(document_id: str):
+    try:
+        filters = _scoped_filters({})
+    except PermissionError as error:
+        return jsonify({"error": str(error), "code": "SCOPE_FORBIDDEN"}), 403
+    values = request.get_json(silent=True) or {}
+    try:
+        item = save_work_item(
+            document_id, filters, values, int(_current_user()["id"]),
+            can_manage=has_permission(_current_user(), "manage_work_queue"),
+        )
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    if item is None:
+        return jsonify({"error": "Nota fiscal não encontrada na fila atual."}), 404
+    _audit(
+        "UPDATE_WORK_ITEM", "WORK_QUEUE", entity_type="DOCUMENT", entity_id=document_id,
+        new_value={key: values.get(key) for key in ("status", "priority", "due_date", "assigned_to")},
+    )
+    return jsonify({"ok": True, "item": _row_dict(item)})
+
+
+@app.get("/api/work-items/<document_id>/comments")
+def list_work_comments(document_id: str):
+    try:
+        filters = _scoped_filters({})
+    except PermissionError as error:
+        return jsonify({"error": str(error), "code": "SCOPE_FORBIDDEN"}), 403
+    rows = work_comments(document_id, filters)
+    if rows is None:
+        return jsonify({"error": "Nota fiscal não encontrada na fila atual."}), 404
+    return jsonify({"rows": [_row_dict(row) for row in rows]})
+
+
+@app.post("/api/work-items/<document_id>/comments")
+def create_work_comment(document_id: str):
+    try:
+        filters = _scoped_filters({})
+    except PermissionError as error:
+        return jsonify({"error": str(error), "code": "SCOPE_FORBIDDEN"}), 403
+    comment = str((request.get_json(silent=True) or {}).get("comment") or "").strip()
+    if not comment:
+        return jsonify({"error": "Escreva um comentário antes de salvar."}), 400
+    if len(comment) > 2000:
+        return jsonify({"error": "O comentário deve possuir no máximo 2.000 caracteres."}), 400
+    row = add_work_comment(document_id, filters, comment, int(_current_user()["id"]))
+    if row is None:
+        return jsonify({"error": "Nota fiscal não encontrada na fila atual."}), 404
+    _audit(
+        "COMMENT_WORK_ITEM", "WORK_QUEUE", entity_type="DOCUMENT", entity_id=document_id,
+        new_value={"comment_id": row["id"]},
+    )
+    return jsonify({"ok": True, "comment": _row_dict(row)}), 201
 
 
 @app.post("/api/regularization/<document_id>/decisions")

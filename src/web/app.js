@@ -20,6 +20,7 @@ const UPLOAD_SOURCES = [
 
 const PAGE_CONFIG = {
   pending: { title: 'Pendências', description: 'Análise lote a lote dos documentos que exigem conferência.', empty: 'Nenhuma pendência encontrada.', columns: ['status', 'situacao_descricao', 'acao_recomendada', 'diagnosis', 'confidence', 'classificacao_automacao', 'nf', 'series', 'doc_date', 'center', 'direcao', 'sap_material', 'lote_sap', 'lote_fabricante', 'quantidade_sap', 'unidade_sap', 'produto_sisdev', 'lote_sisdev', 'quantidade_sisdev'] },
+  work_queue: { title: 'Fila de trabalho', description: 'Pendências do dia com responsável, prioridade, prazo e histórico de tratamento.', empty: 'Nenhuma tarefa pendente.', columns: ['prioridade_trabalho', 'andamento', 'responsavel', 'prazo', 'numero_nfe', 'serie', 'data_documento', 'centro', 'direcao', 'situacao', 'acao_recomendada', 'comentarios', '__work_actions'] },
   regularization: { title: 'Regularizar SISDEV', description: 'Fila inteligente por nota fiscal: resumo primeiro e rastreabilidade sob demanda.', empty: 'Nenhuma nota fiscal para regularizar.', columns: ['prioridade', 'situacao', 'diagnostico_situacao', 'status_saldo', 'acao_recomendada', 'numero_nfe', 'serie', 'data_documento', 'cnpj', 'produto', 'volume_embalagem', 'quantidade_embalagem', 'itens_resumo', '__detail'] },
   analysis: { title: 'Análises', description: 'Resumo das ocorrências por status, diagnóstico e confiança.', empty: 'Nenhuma análise disponível.', columns: ['status', 'diagnosis', 'confidence', 'ocorrencias'] },
   invoices: { title: 'Notas Fiscais', description: 'Notas fiscais SAP consolidadas por documento, centro e direção.', empty: 'Nenhuma nota fiscal encontrada.', columns: ['nf', 'series', 'doc_date', 'center', 'direcao', 'linhas', 'quantidade_sap'] },
@@ -60,6 +61,8 @@ const LABELS = {
   status_lancamento_sap: 'Status de lançamento SAP', status_operacional: 'Status operacional',
   compatibilidade: 'Compatibilidade', tratamento_status: 'Tratamento',
   emitente: 'Emitente', tipo_entrada: 'Tipo de entrada',
+  prioridade_trabalho: 'Prioridade', andamento: 'Andamento', responsavel: 'Responsável',
+  prazo: 'Prazo', comentarios: 'Comentários',
 };
 
 const state = {
@@ -84,6 +87,8 @@ const state = {
   lotTraceOptions: new Map(),
   lotTraceSelection: null,
   lotTraceSearchTimer: 0,
+  workQueueAssignees: [],
+  editingWorkItem: null,
 };
 
 class ApiError extends Error {
@@ -1033,15 +1038,15 @@ function orderedColumns(rows, preferred = []) {
 }
 
 function isStatusColumn(column) {
-  return ['status', 'situacao', 'confidence'].includes(column);
+  return ['status', 'situacao', 'confidence', 'andamento'].includes(column);
 }
 
 function recordStatusClass(value) {
   const normalized = String(value || '').toUpperCase();
-  if (/CORRETO|CONCLU|ALTA|SUCESS/.test(normalized)) return 'completed';
-  if (/ALERTA|PENDENTE|M[ÉE]DIA/.test(normalized)) return 'warning';
+  if (/CORRETO|CONCLU|REGULARIZADA|VALIDADA|ALTA|SUCESS/.test(normalized)) return 'completed';
+  if (/NOVA|AGUARDANDO|ALERTA|PENDENTE|M[ÉE]DIA/.test(normalized)) return 'warning';
   if (/DIVERG|FALH|ERRO|N[ÃA]O_LAN[ÇC]ADO/.test(normalized)) return 'failed';
-  if (/PROCESS/.test(normalized)) return 'processing';
+  if (/PROCESS|AN[ÁA]LISE/.test(normalized)) return 'processing';
   return '';
 }
 
@@ -1053,6 +1058,8 @@ function renderPageTable(page, data) {
     ? preferredColumns.filter((column) => column === '__detail' || rows.some((row) => Object.hasOwn(row, column)))
     : page === 'users'
       ? preferredColumns.filter((column) => column === '__user_actions' || rows.some((row) => Object.hasOwn(row, column)))
+      : page === 'work_queue'
+        ? preferredColumns.filter((column) => column === '__work_actions' || rows.some((row) => Object.hasOwn(row, column)))
       : orderedColumns(rows, preferredColumns);
   if (page === 'regularization') populateRegularizationLotOptions(data.filter_options?.product_lots || []);
   if (page === 'pending' && rows.some((row) => row.reconciliation_id)) columns.push('__actions');
@@ -1064,8 +1071,8 @@ function renderPageTable(page, data) {
 
   if (columns.length) {
     $('page-head').append(create('tr', {}, columns.map((column) => {
-       const special = column === '__actions' || column === '__detail' || column === '__user_actions';
-       const button = create('button', { type: 'button', className: 'sort-button', text: column === '__actions' ? 'Tratamento' : column === '__detail' ? 'Detalhe' : column === '__user_actions' ? 'Ações' : formatLabel(column) });
+       const special = column === '__actions' || column === '__detail' || column === '__user_actions' || column === '__work_actions';
+       const button = create('button', { type: 'button', className: 'sort-button', text: column === '__actions' ? 'Tratamento' : column === '__detail' ? 'Detalhe' : column === '__user_actions' ? 'Ações' : column === '__work_actions' ? 'Tratar' : formatLabel(column) });
        if (special) return create('th', {}, button);
       if (state.sort === column) button.textContent += state.order === 'asc' ? ' ↑' : ' ↓';
       button.addEventListener('click', () => {
@@ -1094,6 +1101,11 @@ function renderPageTable(page, data) {
           remove.addEventListener('click', () => deleteExistingUser(row, remove));
           return create('td', { className: 'user-action-cell' }, [edit, remove]);
         }
+        if (column === '__work_actions') {
+          const button = create('button', { type: 'button', className: 'detail-button', text: 'Abrir tarefa' });
+          button.addEventListener('click', () => openWorkItem(row));
+          return create('td', { className: 'detail-action-cell' }, button);
+        }
         if (column === '__actions') {
           const button = create('button', { type: 'button', className: 'secondary', text: 'Registrar' });
           button.addEventListener('click', async () => {
@@ -1117,7 +1129,7 @@ function renderPageTable(page, data) {
           return create('td', {}, button);
         }
         const text = displayValue(column, row[column]);
-        if (column === 'prioridade') {
+        if (column === 'prioridade' || column === 'prioridade_trabalho') {
           return create('td', {}, create('span', { className: `priority-badge priority-${String(row[column] || '').toLowerCase()}`, text }));
         }
         if (column === 'diagnostico_situacao' || column === 'acao_recomendada' || column === 'status_saldo') {
@@ -1433,15 +1445,22 @@ function renderPagination(page, pagination) {
 function renderPageSummary(page, summary) {
   const box = $('page-summary');
   box.replaceChildren();
-  if (page !== 'regularization' || !summary) {
+  if (!['regularization', 'work_queue'].includes(page) || !summary) {
     box.hidden = true;
     return;
   }
   box.hidden = false;
-  box.append(
-    create('strong', { text: `${formatNumber(summary.total)} notas para regularizar` }),
-    document.createTextNode(` · ${formatNumber(summary.entries)} entradas · ${formatNumber(summary.exits)} saídas · ${formatNumber(summary.recipes_suggested)} com receita sugerida (D ou D-1).`),
-  );
+  if (page === 'work_queue') {
+    box.append(
+      create('strong', { text: `${formatNumber(summary.total)} tarefas no ciclo atual` }),
+      document.createTextNode(` · ${formatNumber(summary.novas)} novas · ${formatNumber(summary.em_analise)} em análise · ${formatNumber(summary.aguardando)} aguardando informação · ${formatNumber(summary.vencidas)} vencidas.`),
+    );
+  } else {
+    box.append(
+      create('strong', { text: `${formatNumber(summary.total)} notas para regularizar` }),
+      document.createTextNode(` · ${formatNumber(summary.entries)} entradas · ${formatNumber(summary.exits)} saídas · ${formatNumber(summary.recipes_suggested)} com receita sugerida (D ou D-1).`),
+    );
+  }
 }
 
 function addExportButtons(container, page) {
@@ -1546,6 +1565,70 @@ function openUserDialog(user = null) {
   $('user-dialog').showModal();
 }
 
+async function openWorkItem(row) {
+  state.editingWorkItem = row;
+  const canManage = hasAccess(state.auth?.user?.permissions) || (state.auth?.user?.permissions || []).includes('manage_work_queue');
+  $('work-item-title').textContent = `Tarefa · NF ${safeText(row.numero_nfe)}`;
+  $('work-item-context').textContent = `${safeText(row.situacao)} · ${safeText(row.centro)} · ${safeText(row.direcao)}`;
+  $('work-item-status').value = row.andamento || 'NOVA';
+  $('work-item-priority').value = row.prioridade_trabalho || 'MEDIA';
+  $('work-item-due').value = row.prazo || '';
+  $('work-item-comment').value = '';
+  $('work-item-message').textContent = '';
+  const assignee = $('work-item-assignee');
+  assignee.replaceChildren(new Option('Não atribuído', ''));
+  for (const user of state.workQueueAssignees) assignee.append(new Option(`${user.display_name} · ${formatLabel(user.profile)}`, String(user.id)));
+  assignee.value = row.responsavel_id ? String(row.responsavel_id) : '';
+  for (const id of ['work-item-assignee', 'work-item-priority', 'work-item-due']) $(id).disabled = !canManage;
+  $('work-comments').replaceChildren(create('p', { text: 'Carregando histórico...' }));
+  $('work-item-dialog').showModal();
+  try {
+    const data = await requestJson(`/api/work-items/${encodeURIComponent(row.document_id)}/comments`, { method: 'GET' }, 20_000);
+    if (state.editingWorkItem?.document_id !== row.document_id) return;
+    $('work-comments').replaceChildren(...((data.rows || []).length
+      ? data.rows.map((item) => create('article', {}, [
+          create('strong', { text: item.author }),
+          create('small', { text: displayValue('created_at', item.created_at) }),
+          create('p', { text: item.comment }),
+        ]))
+      : [create('p', { text: 'Nenhum comentário registrado.' })]));
+  } catch (error) {
+    $('work-comments').replaceChildren(create('p', { className: 'table-error', text: error.message }));
+  }
+}
+
+async function saveCurrentWorkItem(event) {
+  event.preventDefault();
+  const row = state.editingWorkItem;
+  if (!row) return;
+  const button = $('save-work-item');
+  button.disabled = true;
+  $('work-item-message').textContent = 'Salvando...';
+  try {
+    await requestJson(`/api/work-items/${encodeURIComponent(row.document_id)}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        status: $('work-item-status').value,
+        assigned_to: $('work-item-assignee').value || null,
+        priority: $('work-item-priority').value,
+        due_date: $('work-item-due').value || null,
+      }),
+    }, 20_000);
+    const comment = $('work-item-comment').value.trim();
+    if (comment) await requestJson(`/api/work-items/${encodeURIComponent(row.document_id)}/comments`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ comment }),
+    }, 20_000);
+    $('work-item-dialog').close();
+    state.editingWorkItem = null;
+    await loadPage('work_queue');
+  } catch (error) {
+    $('work-item-message').textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function deleteExistingUser(user, button) {
   if (Number(user.id) === Number(state.auth?.user?.id)) {
     $('notice').hidden = false;
@@ -1577,8 +1660,10 @@ async function loadPage(page) {
   $('page-head').replaceChildren();
   $('page-body').replaceChildren(create('tr', {}, create('td', { text: 'Carregando registros...' })));
   try {
-    const data = await requestJson(`/api/page/${encodeURIComponent(page)}?${qs()}`, { method: 'GET' }, 45_000);
+    const endpoint = page === 'work_queue' ? '/api/work-items' : `/api/page/${encodeURIComponent(page)}`;
+    const data = await requestJson(`${endpoint}?${qs()}`, { method: 'GET' }, 45_000);
     if (requestId !== state.requestSequence || state.current !== page) return;
+    if (page === 'work_queue') state.workQueueAssignees = data.assignees || [];
     renderPageTable(page, data);
   } catch (error) {
     if (requestId !== state.requestSequence || state.current !== page) return;
@@ -1604,7 +1689,7 @@ function updateViewVisibility(page) {
 }
 
 function configureFilters(page) {
-  const operational = ['pending', 'regularization'].includes(page);
+  const operational = ['pending', 'regularization', 'work_queue'].includes(page);
   $('direction-filter-label').hidden = page === 'regularization';
   $('status-filter-label').hidden = !operational;
   $('nf-filter-label').hidden = !operational;
@@ -1615,6 +1700,8 @@ function configureFilters(page) {
     ? ['PENDENTE', 'REGULARIZADO', 'DIVERGENTE', 'SEM_RECEITA', 'RECEITAS_MULTIPLAS', 'SEM_SALDO', 'MATERIAL_NAO_MAPEADO', 'LOTE_NAO_MAPEADO', 'ERRO_CONCILIACAO']
     : page === 'regularization'
       ? ['PENDENTE', 'EM_ANALISE', 'TRATADO', 'ENTRADA_FORNECEDOR', 'OK', 'SEM_RECEITA', 'RECEITAS_MULTIPLAS', 'SALDO_PARCIAL', 'SEM_SALDO', 'MATERIAL_NAO_MAPEADO', 'LOTE_NAO_MAPEADO', 'MOVIMENTACAO_NAO_LOCALIZADA', 'PENDENTE_ESTORNO', 'ESTORNO_PARCIAL', 'ESTORNO_COMPLETO', 'DIVERGENTE', 'ERRO_CONCILIACAO']
+      : page === 'work_queue'
+        ? ['NOVA', 'EM_ANALISE', 'AGUARDANDO_INFORMACAO', 'REGULARIZADA', 'VALIDADA']
       : [];
   select.replaceChildren(new Option('Todos', ''));
   for (const value of options) select.append(new Option(formatLabel(value), value));
@@ -1783,6 +1870,8 @@ function installEvents() {
     $('regularization-detail-dialog').close();
   });
   $('regularization-detail-dialog').addEventListener('cancel', () => { state.detailSequence += 1; });
+  $('cancel-work-item').addEventListener('click', () => { state.editingWorkItem = null; $('work-item-dialog').close(); });
+  $('work-item-form').addEventListener('submit', saveCurrentWorkItem);
   for (const link of document.querySelectorAll('nav a[data-page]')) {
     link.addEventListener('click', (event) => {
       event.preventDefault();

@@ -118,6 +118,7 @@ Exemplo: `40 L ÷ 0,06 L/ha = 666,67 ha`.
 - Histórico de importações, eventos, progresso, alertas e causa amigável de falha.
 - Central operacional do ciclo de importação, atualizada automaticamente enquanto houver worker ativo.
 - Linha do tempo pesquisável no formato `Produto & Lote`, com documentos SAP, movimentos SISDEV, receitas Agrotis, tratamentos auditados e saldo oficial dos arquivos de estoque.
+- Fila diária de trabalho baseada nas pendências reais, com responsável, prioridade, prazo, andamento, comentários e validação pelo gestor.
 - Backup privado das configurações, teste de restauração e restauração administrativa confirmada.
 
 ### Regularizar SISDEV — saída

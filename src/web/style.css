@@ -701,6 +701,25 @@ button.danger { background: #8e3037; color: #fff; border-color: #b74b54; }
 .lot-trace-stock strong { display: block; margin-bottom: 6px; }
 .lot-trace-stock span { display: block; color: #a8bdcc; line-height: 1.55; }
 .lot-trace-table-panel table { min-width: 1280px; }
+
+.work-item-dialog { width: min(680px, calc(100vw - 28px)); }
+.work-item-context { margin: -4px 0 4px; color: #9fb6c7; }
+.work-item-dialog textarea {
+  width: 100%; resize: vertical; min-height: 78px; padding: 9px 10px;
+  color: #eaf4fb; background: #091d2d; border: 1px solid #31516a; border-radius: 5px;
+}
+.work-comment-history { display: grid; gap: 7px; max-height: 220px; overflow: auto; }
+.work-comment-history > strong { color: #b9cad6; }
+.work-comment-history article { padding: 9px 10px; border: 1px solid #29465a; border-radius: 5px; background: #0a1d2d; }
+.work-comment-history article strong { display: inline-block; margin-right: 8px; }
+.work-comment-history article small { color: #8fa8b9; }
+.work-comment-history article p { margin: 6px 0 0; white-space: pre-wrap; }
+body[data-profile="AUDITOR"] #work-assignee-label,
+body[data-profile="AUDITOR"] #work-priority-label,
+body[data-profile="AUDITOR"] #work-due-label,
+body[data-profile="OPERADOR"] #work-assignee-label,
+body[data-profile="OPERADOR"] #work-priority-label,
+body[data-profile="OPERADOR"] #work-due-label { opacity: .65; }
 .trace-origin { font-weight: 800; }
 .trace-origin.sap { color: #72bdf0; }
 .trace-origin.sisdev { color: #5ed989; }

@@ -12,7 +12,8 @@ from openpyxl import Workbook
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from auditor import database, engine  # noqa: E402
+from auditor import database, engine, work_queue  # noqa: E402
+from auditor.security import create_user  # noqa: E402
 
 
 class EngineUnitTests(unittest.TestCase):
@@ -304,6 +305,39 @@ class EngineDatabaseTests(unittest.TestCase):
         self.assertIsNotNone(detail)
         self.assertEqual(len(detail["items"]), 2)
         self.assertEqual({item["produto"] for item in detail["items"]}, {"PRODUTO A", "PRODUTO B"})
+
+    def test_work_queue_persists_owner_status_deadline_and_comments(self):
+        manager = create_user(
+            "manager@example.com", "Gestora", "Senha-segura-123", "GESTOR",
+            scopes=[("CENTER", "0714")],
+        )
+        run_id = engine.create_import_run()
+        with mock.patch.object(engine, "_read_source", return_value=[(2, self._sap_row())]):
+            engine.import_source(run_id, "sap_exit_current", self._path("exit.xlsx"))
+        engine.reconcile_run(run_id, require_complete=False)
+
+        initial = work_queue.work_queue_rows({"allowed_centers": ["0714"]})
+        self.assertEqual(initial["pagination"]["total"], 1)
+        document = initial["rows"][0]
+        self.assertEqual(document["andamento"], "NOVA")
+
+        saved = work_queue.save_work_item(
+            document["document_id"], {"allowed_centers": ["0714"]},
+            {"status": "EM_ANALISE", "priority": "ALTA", "due_date": "2026-09-15", "assigned_to": manager["id"]},
+            manager["id"], can_manage=True,
+        )
+        self.assertEqual(saved["status"], "EM_ANALISE")
+        work_queue.add_work_comment(
+            document["document_id"], {"allowed_centers": ["0714"]},
+            "Conferência iniciada.", manager["id"],
+        )
+
+        updated = work_queue.work_queue_rows({"allowed_centers": ["0714"], "status": "EM_ANALISE"})
+        self.assertEqual(updated["pagination"]["total"], 1)
+        self.assertEqual(updated["rows"][0]["responsavel"], "Gestora")
+        self.assertEqual(updated["rows"][0]["comentarios"], 1)
+        comments = work_queue.work_comments(document["document_id"], {"allowed_centers": ["0714"]})
+        self.assertEqual(comments[0]["comment"], "Conferência iniciada.")
 
     def test_regularization_product_lot_filter_returns_all_related_notes(self):
         first = self._sap_row(lot="LOTE-A")
