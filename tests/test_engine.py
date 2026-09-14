@@ -336,6 +336,9 @@ class EngineDatabaseTests(unittest.TestCase):
         self.assertEqual(updated["pagination"]["total"], 1)
         self.assertEqual(updated["rows"][0]["responsavel"], "Gestora")
         self.assertEqual(updated["rows"][0]["comentarios"], 1)
+        self.assertEqual(updated["management"]["priorities"][0]["total"], 1)
+        self.assertEqual(updated["management"]["assignees"][0]["label"], "Gestora")
+        self.assertEqual(sum(item["total"] for item in updated["management"]["aging"]), 1)
         filtered = work_queue.work_queue_rows({
             "allowed_centers": ["0714"], "priority": "ALTA",
             "assigned_to": str(manager["id"]), "due_status": "NO_PRAZO",

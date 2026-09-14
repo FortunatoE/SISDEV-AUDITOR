@@ -1151,6 +1151,7 @@ function renderPageTable(page, data) {
     }
   }
   renderPageSummary(page, data.summary);
+  renderWorkQueueManagement(page, data.management);
   renderPageActions(page);
   renderPagination(page, data.pagination);
 }
@@ -1467,6 +1468,38 @@ function renderPageSummary(page, summary) {
       create('strong', { text: `${formatNumber(summary.total)} notas para regularizar` }),
       document.createTextNode(` · ${formatNumber(summary.entries)} entradas · ${formatNumber(summary.exits)} saídas · ${formatNumber(summary.recipes_suggested)} com receita sugerida (D ou D-1).`),
     );
+  }
+}
+
+function renderWorkQueueManagement(page, management) {
+  const panel = $('work-queue-management');
+  panel.replaceChildren();
+  if (page !== 'work_queue' || !management) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  const groups = [
+    ['Carga por prioridade', management.priorities || []],
+    ['Carga por responsável', management.assignees || []],
+    ['Idade do documento', management.aging || []],
+  ];
+  for (const [title, values] of groups) {
+    const card = create('article', {}, create('h3', { text: title }));
+    const list = create('div', { className: 'management-bars' });
+    for (const item of values) {
+      const fill = create('span', { className: 'management-bar-fill' });
+      fill.style.width = `${Math.max(0, Math.min(100, Number(item.percentage) || 0))}%`;
+      list.append(create('div', { className: 'management-bar' }, [
+        create('div', { className: 'management-bar-label' }, [
+          create('span', { text: item.label }),
+          create('strong', { text: `${formatNumber(item.total)} · ${item.percentage}%` }),
+        ]),
+        create('div', { className: 'management-bar-track' }, fill),
+      ]));
+    }
+    card.append(list);
+    panel.append(card);
   }
 }
 

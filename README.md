@@ -32,7 +32,7 @@ Principais melhorias entregues:
 - rastreabilidade cronológica por produto e lote, reunindo SAP, SISDEV, receitas e tratamentos com acumulados independentes por sistema e unidade;
 - classificação preparatória `CANDIDATO_AUTOMACAO` ou `REVISAO_HUMANA`, sem executar ações críticas automaticamente.
 
-Validação local desta versão: **61 testes automatizados aprovados**, incluindo saúde do ciclo, linha do tempo por lote, retomada durável de importações, agrupamento por NF/lote, detalhamento sob demanda, validação das receitas escolhidas, autorização, isolamento por centro, ownership de importações e auditoria das decisões.
+Validação local desta versão: **63 testes automatizados aprovados**, incluindo saúde do ciclo, linha do tempo por lote, fila gerencial, retomada durável de importações, agrupamento por NF/lote, detalhamento sob demanda, validação das receitas escolhidas, autorização, isolamento por centro, ownership de importações e auditoria das decisões.
 
 ### Reforço de segurança desta versão
 
@@ -120,6 +120,7 @@ Exemplo: `40 L ÷ 0,06 L/ha = 666,67 ha`.
 - Linha do tempo pesquisável no formato `Produto & Lote`, com documentos SAP, movimentos SISDEV, receitas Agrotis, tratamentos auditados e saldo oficial dos arquivos de estoque.
 - Fila diária de trabalho baseada nas pendências reais, com responsável, prioridade, prazo, andamento, comentários e validação pelo gestor.
 - Gestão da fila com indicadores de atraso, vencimento no dia e tarefas sem responsável; filtros próprios e exportação CSV/XLSX respeitando a visão selecionada.
+- Painel gerencial da fila com distribuição por prioridade, carga por responsável e idade dos documentos, sempre recalculado sobre os filtros ativos.
 - Backup privado das configurações, teste de restauração e restauração administrativa confirmada.
 
 ### Regularizar SISDEV — saída

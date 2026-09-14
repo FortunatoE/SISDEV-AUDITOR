@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from .database import connect
@@ -19,6 +19,65 @@ WORK_STATUSES = (
     "NOVA", "EM_ANALISE", "AGUARDANDO_INFORMACAO", "REGULARIZADA", "VALIDADA",
 )
 WORK_PRIORITIES = ("BAIXA", "MEDIA", "ALTA")
+
+
+def _age_days(value: Any) -> int | None:
+    raw = text(value)
+    if not raw:
+        return None
+    for pattern in ("%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            return max(0, (date.today() - datetime.strptime(raw[:10], pattern).date()).days)
+        except ValueError:
+            continue
+    return None
+
+
+def _management_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    total = len(rows)
+
+    def distribution(values: list[tuple[str, str, int]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "code": code, "label": label, "total": count,
+                "percentage": round((count / total) * 100, 1) if total else 0,
+            }
+            for code, label, count in values
+        ]
+
+    priorities = distribution([
+        (value, value.title(), sum(key(row.get("prioridade_trabalho")) == value for row in rows))
+        for value in ("ALTA", "MEDIA", "BAIXA")
+    ])
+    owners: dict[str, int] = {}
+    for row in rows:
+        owner = text(row.get("responsavel")) or "Não atribuído"
+        owners[owner] = owners.get(owner, 0) + 1
+    assignees = distribution([
+        (owner, owner, count)
+        for owner, count in sorted(owners.items(), key=lambda item: (-item[1], item[0]))[:8]
+    ])
+    ages = {"ATE_2": 0, "3_A_7": 0, "8_A_30": 0, "MAIS_30": 0, "SEM_DATA": 0}
+    for row in rows:
+        days = _age_days(row.get("data_documento"))
+        if days is None:
+            ages["SEM_DATA"] += 1
+        elif days <= 2:
+            ages["ATE_2"] += 1
+        elif days <= 7:
+            ages["3_A_7"] += 1
+        elif days <= 30:
+            ages["8_A_30"] += 1
+        else:
+            ages["MAIS_30"] += 1
+    aging = distribution([
+        ("ATE_2", "Até 2 dias", ages["ATE_2"]),
+        ("3_A_7", "3 a 7 dias", ages["3_A_7"]),
+        ("8_A_30", "8 a 30 dias", ages["8_A_30"]),
+        ("MAIS_30", "Mais de 30 dias", ages["MAIS_30"]),
+        ("SEM_DATA", "Sem data", ages["SEM_DATA"]),
+    ])
+    return {"priorities": priorities, "assignees": assignees, "aging": aging}
 
 
 def _page_values(filters: dict[str, Any]) -> tuple[int, int]:
@@ -142,6 +201,7 @@ def work_queue_rows(filters: dict[str, Any] | None = None) -> dict[str, Any]:
                 "sem_responsavel": sum(not row.get("responsavel_id") for row in rows),
                 "concluidas": sum(key(row.get("andamento")) in {"REGULARIZADA", "VALIDADA"} for row in rows),
             },
+            "management": _management_metrics(rows),
             "pagination": {
                 "page": page, "per_page": per_page, "total": total,
                 "total_pages": total_pages, "from": offset + 1 if visible else 0,
