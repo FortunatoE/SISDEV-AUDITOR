@@ -357,6 +357,8 @@ def _row_dict(row: Any) -> dict[str, Any]:
 def _safe_error(error: BaseException) -> str:
     text = str(error).strip()
     lowered = text.lower()
+    if any(marker in lowered for marker in ("project size limit", "diskfull", "disk full", "could not extend file")):
+        return "O banco Neon atingiu o limite de armazenamento. Libere espaço ou amplie o plano para continuar."
     if "workflow" in lowered or "queue" in lowered:
         return "Não foi possível iniciar a fila agora. Tente novamente em instantes."
     if "blob" in lowered:

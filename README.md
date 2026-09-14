@@ -239,6 +239,7 @@ Variáveis obrigatórias na Vercel:
 DATABASE_URL=<conexão pooled do Neon>
 BLOB_READ_WRITE_TOKEN=<token do Vercel Blob>
 SISDEV_SECRET_KEY=<segredo aleatório longo para assinar a sessão>
+SISDEV_AUTO_MIGRATE=0
 SISDEV_BOOTSTRAP_ADMIN_EMAIL=<usuário ou e-mail do primeiro administrador>
 SISDEV_BOOTSTRAP_ADMIN_PASSWORD=<senha inicial forte>
 SISDEV_BOOTSTRAP_ADMIN_NAME=<nome opcional>
@@ -261,6 +262,8 @@ sql/work_queue.sql
 ```
 
 Os scripts são idempotentes e podem ser reaplicados em atualizações de schema. Use conexão direta para a migração e a conexão pooled para a aplicação.
+
+Em produção, mantenha `SISDEV_AUTO_MIGRATE=0`: nenhuma requisição — inclusive login — deve executar DDL. As migrações são uma etapa administrativa explícita, evitando indisponibilidade quando o banco estiver próximo do limite de armazenamento.
 
 ## Desenvolvimento e testes
 

@@ -34,6 +34,20 @@ _SCHEMA_LOCK = threading.RLock()
 _SCHEMA_READY: set[tuple[str, str]] = set()
 
 
+def postgres_migrations_enabled() -> bool:
+    """Keep schema changes out of normal serverless request handling.
+
+    Production migrations are applied explicitly from ``sql/``. Running DDL
+    during login makes every cold start depend on free database storage and can
+    take the whole API down when the Neon quota is reached.
+    """
+
+    configured = str(os.getenv("SISDEV_AUTO_MIGRATE") or "").strip().lower()
+    if configured:
+        return configured in {"1", "true", "yes", "on"}
+    return not bool(os.getenv("VERCEL"))
+
+
 def _base_statements(id_type: str, timestamp_type: str) -> list[str]:
     return [
         f"""CREATE TABLE IF NOT EXISTS import_runs (
@@ -555,11 +569,12 @@ def connect() -> Connection:
         from psycopg.rows import dict_row
 
         raw = psycopg.connect(database_url, row_factory=dict_row)
-        schema_key = ("postgres", database_url)
-        with _SCHEMA_LOCK:
-            if schema_key not in _SCHEMA_READY:
-                _ensure_postgres_schema(raw)
-                _SCHEMA_READY.add(schema_key)
+        if postgres_migrations_enabled():
+            schema_key = ("postgres", database_url)
+            with _SCHEMA_LOCK:
+                if schema_key not in _SCHEMA_READY:
+                    _ensure_postgres_schema(raw)
+                    _SCHEMA_READY.add(schema_key)
         return Connection(raw, postgres=True)
 
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)

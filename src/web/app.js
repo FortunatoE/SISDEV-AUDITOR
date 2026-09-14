@@ -186,6 +186,7 @@ function friendlyServerMessage(status, detail = '', raw = '') {
   if (status === 405) return 'Esta ação ainda não está habilitada no servidor.';
   if (status === 408 || status === 504 || /timed?\s*out|timeout/i.test(source)) return 'O servidor excedeu o tempo de resposta. O processamento continuará em segundo plano quando possível.';
   if (status === 413) return 'O arquivo é maior que o limite aceito pelo servidor.';
+  if (/banco neon atingiu o limite|limite de armazenamento/i.test(source)) return source;
   if (status >= 500 || /traceback|sql|transaction|column\s+.+does not exist|internal server/i.test(source)) return 'O servidor encontrou um erro ao concluir a operação. Consulte o status da fonte e tente novamente.';
   if (source && source.length <= 240) return source;
   return 'Não foi possível concluir a operação.';

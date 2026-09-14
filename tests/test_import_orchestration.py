@@ -18,6 +18,22 @@ from auditor import engine
 from workflow import imports as workflow_imports
 
 
+def test_postgres_migrations_are_disabled_by_default_on_vercel(monkeypatch):
+    monkeypatch.setenv("VERCEL", "1")
+    monkeypatch.delenv("SISDEV_AUTO_MIGRATE", raising=False)
+    assert database.postgres_migrations_enabled() is False
+    monkeypatch.setenv("SISDEV_AUTO_MIGRATE", "1")
+    assert database.postgres_migrations_enabled() is True
+
+
+def test_storage_quota_error_is_actionable():
+    error = RuntimeError("could not extend file because project size limit (512 MB) has been exceeded")
+    assert api._safe_error(error) == (
+        "O banco Neon atingiu o limite de armazenamento. "
+        "Libere espaço ou amplie o plano para continuar."
+    )
+
+
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
