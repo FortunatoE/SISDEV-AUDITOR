@@ -48,6 +48,18 @@ Validação local desta versão: **63 testes automatizados aprovados**, incluind
 
 O relatório técnico detalhado da auditoria é mantido como documento interno e não é publicado no repositório público.
 
+### Atualizações operacionais recentes
+
+| Módulo | Atualização |
+| --- | --- |
+| Importações | Central de saúde do ciclo com prontidão, progresso, fontes ausentes, falhas e orientação da próxima ação. |
+| Rastreabilidade | Linha do tempo por `Produto & Lote`, reunindo documentos SAP, movimentos SISDEV, receitas, tratamentos e saldos oficiais. |
+| Fila de trabalho | Tarefas persistentes por documento, com responsável, prioridade, prazo, andamento, comentários e validação gerencial. |
+| Gestão de prazos | Filtros por prioridade, responsável e situação do prazo, atalho **Minhas tarefas** e exportação da visão filtrada. |
+| Painel gerencial | Distribuição por prioridade, carga por responsável e idade dos documentos, recalculadas conforme os filtros ativos. |
+
+As telas operacionais continuam orientadas à revisão humana: o sistema explica a divergência e recomenda a ação, mas não executa lançamentos ou estornos críticos automaticamente.
+
 ## Fluxo operacional
 
 1. O usuário envia cada fonte separadamente na guia **Importar arquivos**.
