@@ -24,6 +24,7 @@ PROFILES = ("ADMINISTRADOR", "GESTOR", "AUDITOR", "OPERADOR", "CONSULTA")
 
 SESSION_IDLE_MINUTES = 30
 SESSION_ABSOLUTE_HOURS = 8
+SESSION_TOUCH_INTERVAL_MINUTES = 5
 
 
 class AuditIdentityError(RuntimeError):
@@ -299,12 +300,18 @@ def validate_session(
             return None
         if csrf is not None and not hmac.compare_digest(row["csrf_hash"], _hash_token(csrf)):
             return None
-        if touch:
-            connection.execute(
-                "UPDATE auth_sessions SET last_seen_at=CURRENT_TIMESTAMP WHERE id=?",
-                (row["session_id"],),
-            )
-            connection.commit()
+        if touch and last_seen_at <= now - timedelta(minutes=SESSION_TOUCH_INTERVAL_MINUTES):
+            try:
+                connection.execute(
+                    "UPDATE auth_sessions SET last_seen_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (row["session_id"],),
+                )
+                connection.commit()
+            except Exception:
+                # A atualização de atividade é auxiliar. Uma falha de escrita
+                # (por exemplo, cota temporariamente cheia) não deve derrubar
+                # consultas autenticadas enquanto a sessão ainda for válida.
+                connection.rollback()
         return public_user(row, connection=connection)
     finally:
         connection.close()

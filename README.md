@@ -265,6 +265,8 @@ Os scripts são idempotentes e podem ser reaplicados em atualizações de schema
 
 Em produção, mantenha `SISDEV_AUTO_MIGRATE=0`: nenhuma requisição — inclusive login — deve executar DDL. As migrações são uma etapa administrativa explícita, evitando indisponibilidade quando o banco estiver próximo do limite de armazenamento.
 
+Se o Neon atingir a cota, execute `sql/storage_emergency_recovery.sql`. O script remove somente um índice redundante de `source_records`, preservando os dados operacionais. A validação de sessão também limita a atualização de atividade a uma vez a cada cinco minutos e trata essa gravação como auxiliar, mantendo as consultas disponíveis mesmo durante uma falha temporária de escrita.
+
 ## Desenvolvimento e testes
 
 ```powershell

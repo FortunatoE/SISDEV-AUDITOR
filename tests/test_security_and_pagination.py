@@ -135,6 +135,41 @@ def test_valid_activity_renews_session_last_seen(secure_client):
     assert str(renewed["last_seen_at"]) != previous
 
 
+def test_recent_session_does_not_write_on_every_read(secure_client, monkeypatch):
+    user = create_user("recent@example.com", "Recent", "Senha-segura-123", "CONSULTA")
+    token, _csrf = create_session(user["id"], user_agent="SISDEV-Test")
+    original_execute = database.Connection.execute
+
+    def reject_touch(connection, query, params=None):
+        if "UPDATE auth_sessions SET last_seen_at" in query:
+            raise AssertionError("sessão recente não deve gerar escrita")
+        return original_execute(connection, query, params)
+
+    monkeypatch.setattr(database.Connection, "execute", reject_touch)
+    assert validate_session(token, user_agent="SISDEV-Test") is not None
+
+
+def test_session_touch_failure_does_not_invalidate_valid_session(secure_client, monkeypatch):
+    user = create_user("full-db@example.com", "Full DB", "Senha-segura-123", "CONSULTA")
+    token, _csrf = create_session(user["id"], user_agent="SISDEV-Test")
+    previous = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    connection = database.connect()
+    connection.execute(
+        "UPDATE auth_sessions SET last_seen_at=? WHERE user_id=?", (previous, user["id"])
+    )
+    connection.commit()
+    connection.close()
+    original_execute = database.Connection.execute
+
+    def fail_touch(connection, query, params=None):
+        if "UPDATE auth_sessions SET last_seen_at" in query:
+            raise RuntimeError("database full")
+        return original_execute(connection, query, params)
+
+    monkeypatch.setattr(database.Connection, "execute", fail_touch)
+    assert validate_session(token, user_agent="SISDEV-Test") is not None
+
+
 def test_users_page_uses_database_pagination(secure_client):
     create_user("admin@example.com", "Admin", "Senha-segura-123", "ADMINISTRADOR")
     login, _csrf = _login(secure_client, "admin@example.com", "Senha-segura-123")

@@ -377,7 +377,6 @@ POSTGRES_BATCH_ALTERS = [
 ]
 
 INDEX_STATEMENTS = [
-    "CREATE INDEX IF NOT EXISTS source_records_run_source_idx ON source_records(run_id, source)",
     "CREATE INDEX IF NOT EXISTS expected_movements_document_idx ON expected_movements(run_id, nf, series, cnpj, direction, center)",
     "CREATE INDEX IF NOT EXISTS expected_movements_match_idx ON expected_movements(run_id, direction, material_key, doc_date)",
     "CREATE INDEX IF NOT EXISTS actual_movements_document_idx ON actual_movements(run_id, nf, series)",
