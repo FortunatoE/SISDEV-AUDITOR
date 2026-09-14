@@ -181,7 +181,8 @@ function qs() {
 
 function friendlyServerMessage(status, detail = '', raw = '') {
   const source = String(detail || raw || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-  if (status === 401 || status === 403) return 'Sua sessão não tem permissão para executar esta ação.';
+  if (status === 401) return source || 'Sua sessão expirou. Entre novamente.';
+  if (status === 403) return 'Sua sessão não tem permissão para executar esta ação.';
   if (status === 404) return 'O recurso solicitado ainda não está disponível no servidor.';
   if (status === 405) return 'Esta ação ainda não está habilitada no servidor.';
   if (status === 408 || status === 504 || /timed?\s*out|timeout/i.test(source)) return 'O servidor excedeu o tempo de resposta. O processamento continuará em segundo plano quando possível.';

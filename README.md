@@ -32,7 +32,7 @@ Principais melhorias entregues:
 - rastreabilidade cronológica por produto e lote, reunindo SAP, SISDEV, receitas e tratamentos com acumulados independentes por sistema e unidade;
 - classificação preparatória `CANDIDATO_AUTOMACAO` ou `REVISAO_HUMANA`, sem executar ações críticas automaticamente.
 
-Validação local desta versão: **63 testes automatizados aprovados**, incluindo saúde do ciclo, linha do tempo por lote, fila gerencial, retomada durável de importações, agrupamento por NF/lote, detalhamento sob demanda, validação das receitas escolhidas, autorização, isolamento por centro, ownership de importações e auditoria das decisões.
+Validação local desta versão: **65 testes automatizados aprovados**, incluindo saúde do ciclo, linha do tempo por lote, fila gerencial, separação entre login e migrações, retomada durável de importações, agrupamento por NF/lote, detalhamento sob demanda, validação das receitas escolhidas, autorização, isolamento por centro, ownership de importações e auditoria das decisões.
 
 ### Reforço de segurança desta versão
 
