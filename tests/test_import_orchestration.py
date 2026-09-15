@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import sys
+import types
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -15,6 +18,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from api import index as api
 from auditor import database
 from auditor import engine
+from auditor.security import create_user
 from workflow import imports as workflow_imports
 
 
@@ -60,6 +64,98 @@ def _create_job(*, status="QUEUED", source="sap_entry_current"):
     connection.commit()
     connection.close()
     return job_id, batch_id, run_id
+
+
+def _valid_xlsx_bytes() -> bytes:
+    content = io.BytesIO()
+    with zipfile.ZipFile(content, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types />")
+        archive.writestr("xl/workbook.xml", "<workbook />")
+    return content.getvalue()
+
+
+def test_duplicate_upload_reuses_existing_job_without_second_blob(client, monkeypatch):
+    puts = []
+
+    class FakeBlobClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def put(self, pathname, stream, **_kwargs):
+            puts.append(pathname)
+            return types.SimpleNamespace(
+                pathname=f"{pathname}-private", download_url="https://blob.invalid/private", url=None
+            )
+
+    monkeypatch.setitem(sys.modules, "vercel.blob", types.SimpleNamespace(BlobClient=FakeBlobClient))
+    payload = _valid_xlsx_bytes()
+    first = client.post(
+        "/api/upload", data={"source": "sap_stock", "file": (io.BytesIO(payload), "MB52.xlsx")},
+        content_type="multipart/form-data",
+    )
+    second = client.post(
+        "/api/upload", data={"source": "sap_stock", "file": (io.BytesIO(payload), "MB52.xlsx")},
+        content_type="multipart/form-data",
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 200
+    assert second.get_json()["duplicate_upload"] is True
+    assert second.get_json()["job_id"] == first.get_json()["job_id"]
+    assert len(puts) == 1
+    connection = database.connect()
+    assert connection.execute("SELECT COUNT(*) AS n FROM import_jobs").fetchone()["n"] == 1
+    connection.close()
+
+
+def test_storage_overview_protects_configured_recent_cycles(client):
+    connection = database.connect()
+    for _ in range(4):
+        connection.execute("INSERT INTO import_runs(status,summary_json) VALUES ('SUCCESS','{}')")
+    connection.commit()
+    connection.close()
+
+    response = client.get("/api/admin/storage")
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["keep_recent_runs"] == 3
+    assert len(body["cycles"]) == 4
+    assert [row["protected"] for row in body["cycles"]] == [True, True, True, False]
+
+
+def test_retention_worker_deletes_in_chunks_and_finishes_archive(client):
+    user = create_user("retention@example.com", "Retention", "Senha-segura-123", "ADMINISTRADOR")
+    connection = database.connect()
+    run_id = connection.execute(
+        "INSERT INTO import_runs(status,summary_json) VALUES ('SUCCESS','{}') RETURNING id"
+    ).fetchone()[0]
+    connection.execute(
+        """INSERT INTO run_archives(
+               run_id,requested_by,manifest_path,manifest_checksum,status,retained_originals
+           ) VALUES (?,?,?,?,?,?)""",
+        (run_id, user["id"], "local:manifest", "checksum", "QUEUED", 1),
+    )
+    connection.executemany(
+        """INSERT INTO source_records(run_id,source,source_file,row_number,fingerprint,raw_json)
+           VALUES (?,?,?,?,?,?)""",
+        [(run_id, "sap_stock", "MB52.xlsx", index, f"fp-{index}", "{}") for index in range(1, 4)],
+    )
+    connection.commit()
+    connection.close()
+
+    assert workflow_imports._archive_chunk(run_id, "source_records") == 3
+    assert workflow_imports._archive_chunk(run_id, "source_records") == 0
+    result = workflow_imports._finish_archive(run_id)
+
+    assert result["released_rows"] == 3
+    connection = database.connect()
+    assert connection.execute("SELECT status FROM import_runs WHERE id=?", (run_id,)).fetchone()["status"] == "ARCHIVED"
+    assert connection.execute("SELECT status FROM run_archives WHERE run_id=?", (run_id,)).fetchone()["status"] == "COMPLETED"
+    connection.close()
 
 
 def test_start_and_get_import_job_are_async_and_idempotent(client, monkeypatch):

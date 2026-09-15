@@ -27,6 +27,7 @@ wf = Workflows(namespace="sisdev")
 
 FINISHED_JOB_STATUSES = {"COMPLETED", "COMPLETED_WITH_WARNINGS"}
 MAX_ROWS_PER_STEP = 5000
+RETENTION_ROWS_PER_STEP = 5000
 
 logger = logging.getLogger(__name__)
 
@@ -478,3 +479,108 @@ async def start_import(job_id: int) -> Run:
 
 async def start_reconciliation(batch_id: int) -> Run:
     return await start(reconcile_import_batch, batch_id)
+
+
+RETENTION_DELETE_QUERIES = {
+    "work_item_comments": """DELETE FROM work_item_comments WHERE id IN (
+        SELECT c.id FROM work_item_comments c
+        JOIN work_items w ON w.id=c.work_item_id WHERE w.run_id=? LIMIT ?
+    )""",
+    "work_items": "DELETE FROM work_items WHERE id IN (SELECT id FROM work_items WHERE run_id=? LIMIT ?)",
+    "action_history": """DELETE FROM action_history WHERE id IN (
+        SELECT h.id FROM action_history h
+        JOIN reconciliations r ON r.id=h.reconciliation_id WHERE r.run_id=? LIMIT ?
+    )""",
+    "document_decisions": "DELETE FROM document_decisions WHERE id IN (SELECT id FROM document_decisions WHERE run_id=? LIMIT ?)",
+    "reconciliations": "DELETE FROM reconciliations WHERE id IN (SELECT id FROM reconciliations WHERE run_id=? LIMIT ?)",
+    "actual_movements": "DELETE FROM actual_movements WHERE id IN (SELECT id FROM actual_movements WHERE run_id=? LIMIT ?)",
+    "expected_movements": "DELETE FROM expected_movements WHERE id IN (SELECT id FROM expected_movements WHERE run_id=? LIMIT ?)",
+    "audit_issues": "DELETE FROM audit_issues WHERE id IN (SELECT id FROM audit_issues WHERE run_id=? LIMIT ?)",
+    "source_records": "DELETE FROM source_records WHERE id IN (SELECT id FROM source_records WHERE run_id=? LIMIT ?)",
+}
+
+
+def _archive_chunk(run_id: int, table: str) -> int:
+    query = RETENTION_DELETE_QUERIES.get(table)
+    if query is None:
+        raise ValueError("Tabela de retenção inválida.")
+    connection = _connect()
+    try:
+        cursor = connection.execute(query, (run_id, RETENTION_ROWS_PER_STEP))
+        deleted = max(0, int(cursor.rowcount or 0))
+        connection.execute(
+            """UPDATE run_archives SET status='PROCESSING',processed_table=?,
+                       released_rows=released_rows+? WHERE run_id=?""",
+            (table, deleted, run_id),
+        )
+        connection.commit()
+        return deleted
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def _finish_archive(run_id: int) -> dict[str, Any]:
+    connection = _connect()
+    try:
+        connection.execute("UPDATE import_runs SET status='ARCHIVED' WHERE id=?", (run_id,))
+        connection.execute(
+            """UPDATE run_archives SET status='COMPLETED',processed_table=NULL,
+                       completed_at=CURRENT_TIMESTAMP WHERE run_id=?""",
+            (run_id,),
+        )
+        archive = connection.execute(
+            "SELECT retained_originals,released_rows FROM run_archives WHERE run_id=?", (run_id,)
+        ).fetchone()
+        connection.commit()
+        return {"run_id": run_id, **dict(archive)}
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def _fail_archive(run_id: int, message: str) -> None:
+    connection = _connect()
+    try:
+        connection.execute(
+            "UPDATE run_archives SET status='FAILED',details_json=? WHERE run_id=?",
+            (json.dumps({"error": message}, ensure_ascii=False), run_id),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+@wf.step(max_retries=2)
+async def archive_run_chunk_step(run_id: int, table: str) -> int:
+    return _archive_chunk(run_id, table)
+
+
+@wf.step(max_retries=1)
+async def finish_archive_step(run_id: int) -> dict[str, Any]:
+    return _finish_archive(run_id)
+
+
+@wf.step(max_retries=0)
+async def fail_archive_step(run_id: int, message: str) -> None:
+    _fail_archive(run_id, message)
+
+
+@wf.workflow
+async def archive_import_run_data(run_id: int) -> dict[str, Any]:
+    try:
+        for table in RETENTION_DELETE_QUERIES:
+            while await archive_run_chunk_step(run_id, table):
+                pass
+        return await finish_archive_step(run_id)
+    except Exception as error:
+        await fail_archive_step(run_id, _friendly_error(error))
+        raise
+
+
+async def start_retention(run_id: int) -> Run:
+    return await start(archive_import_run_data, run_id)

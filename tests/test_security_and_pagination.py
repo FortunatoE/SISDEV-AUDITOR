@@ -508,6 +508,53 @@ def test_private_configuration_backup_can_be_restore_tested(secure_client, tmp_p
     assert tested.get_json()["result"] == "VERIFIED"
 
 
+def test_admin_archives_old_run_but_preserves_original_job(secure_client, tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "ROOT", tmp_path)
+    monkeypatch.setattr(api, "_start_retention_workflow", lambda _run_id: "wfr-retention-test")
+    admin = create_user("storage-admin@example.com", "Storage Admin", "Senha-segura-123", "ADMINISTRADOR")
+    _login_response, csrf = _login(secure_client, admin["email"], "Senha-segura-123")
+    connection = database.connect()
+    run_ids = [
+        connection.execute(
+            "INSERT INTO import_runs(status,summary_json) VALUES ('SUCCESS','{}') RETURNING id"
+        ).fetchone()[0]
+        for _ in range(4)
+    ]
+    old_run = run_ids[0]
+    connection.execute(
+        """INSERT INTO import_jobs(
+               run_id,source,source_file,blob_path,status,file_sha256,file_size,created_by
+           ) VALUES (?,?,?,?,?,?,?,?)""",
+        (old_run, "sap_stock", "MB52.xlsx", "sisdev/sap_stock/MB52-private.xlsx", "COMPLETED", "abc", 123, admin["id"]),
+    )
+    connection.execute(
+        """INSERT INTO source_records(run_id,source,source_file,row_number,fingerprint,raw_json)
+           VALUES (?,?,?,?,?,?)""",
+        (old_run, "sap_stock", "MB52.xlsx", 1, "fingerprint", "{}"),
+    )
+    connection.commit()
+    connection.close()
+
+    response = secure_client.post(
+        f"/api/admin/storage/archive/{old_run}",
+        headers={"X-CSRF-Token": csrf},
+        json={"confirmation": f"ARQUIVAR {old_run}", "justification": "Teste de retenção"},
+    )
+
+    assert response.status_code == 202
+    assert response.get_json()["archive"]["released_rows"] == 0
+    assert response.get_json()["archive"]["workflow_run_id"] == "wfr-retention-test"
+    connection = database.connect()
+    assert connection.execute("SELECT status FROM import_runs WHERE id=?", (old_run,)).fetchone()["status"] == "SUCCESS"
+    assert connection.execute("SELECT COUNT(*) AS n FROM source_records WHERE run_id=?", (old_run,)).fetchone()["n"] == 1
+    assert connection.execute("SELECT COUNT(*) AS n FROM import_jobs WHERE run_id=?", (old_run,)).fetchone()["n"] == 1
+    archive = connection.execute("SELECT * FROM run_archives WHERE run_id=?", (old_run,)).fetchone()
+    connection.close()
+    assert archive["status"] == "QUEUED"
+    assert archive["retained_originals"] == 1
+    assert str(archive["manifest_path"]).startswith("local:")
+
+
 def test_audit_resolves_stale_session_id_by_authenticated_email(secure_client):
     user = create_user("audit@example.com", "Audit", "Senha-segura-123", "AUDITOR")
     record_audit(

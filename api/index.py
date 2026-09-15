@@ -28,6 +28,7 @@ from werkzeug.utils import secure_filename
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from auditor import database as database_module
 from auditor.database import REQUIRED_IMPORT_SOURCES, connect
 from auditor.engine import (
     dashboard_v2,
@@ -164,6 +165,9 @@ ENDPOINT_PERMISSIONS = {
     "create_backup": "manage_backup",
     "test_restore_backup": "manage_backup",
     "restore_backup": "manage_backup",
+    "storage_overview": "manage_backup",
+    "update_storage_policy": "manage_backup",
+    "archive_import_run": "manage_backup",
     "record_pending_action": "treat_pending",
     "record_regularization_decision": "treat_pending",
     "update_work_item": "treat_pending",
@@ -256,6 +260,122 @@ def _read_private_backup(storage_path: str) -> bytes:
 
     with BlobClient() as client:
         return bytes(client.get(storage_path, access="private"))
+
+
+RUN_DATA_TABLES = (
+    "source_records",
+    "expected_movements",
+    "actual_movements",
+    "reconciliations",
+    "audit_issues",
+    "document_decisions",
+    "work_items",
+)
+
+
+def _storage_keep_recent_runs(connection: Any) -> int:
+    row = connection.execute(
+        "SELECT value FROM app_settings WHERE key='storage_keep_recent_runs'"
+    ).fetchone()
+    try:
+        return max(1, min(20, int(row["value"] if row else 3)))
+    except (TypeError, ValueError):
+        return 3
+
+
+def _run_row_counts(connection: Any) -> tuple[dict[int, dict[str, int]], dict[str, int]]:
+    per_run: dict[int, dict[str, int]] = {}
+    totals: dict[str, int] = {}
+    for table in RUN_DATA_TABLES:
+        total = int(connection.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"])
+        totals[table] = total
+        for row in connection.execute(
+            f"SELECT run_id,COUNT(*) AS n FROM {table} GROUP BY run_id"
+        ):
+            per_run.setdefault(int(row["run_id"]), {})[table] = int(row["n"])
+    return per_run, totals
+
+
+def _storage_snapshot(connection: Any) -> dict[str, Any]:
+    per_run, table_counts = _run_row_counts(connection)
+    table_bytes: dict[str, int] = {}
+    if connection.postgres:
+        database_bytes = int(connection.execute(
+            "SELECT pg_database_size(current_database()) AS size"
+        ).fetchone()["size"])
+        for table in RUN_DATA_TABLES:
+            table_bytes[table] = int(connection.execute(
+                "SELECT pg_total_relation_size(?::regclass) AS size", (table,)
+            ).fetchone()["size"])
+    else:
+        database_bytes = (
+            database_module.DB_PATH.stat().st_size if database_module.DB_PATH.exists() else 0
+        )
+        total_rows = sum(table_counts.values()) or 1
+        table_bytes = {
+            table: round(database_bytes * count / total_rows)
+            for table, count in table_counts.items()
+        }
+
+    capacity_bytes = max(
+        1,
+        int(os.getenv("SISDEV_NEON_STORAGE_LIMIT_BYTES", str(512 * 1024 * 1024))),
+    )
+    usage_percent = round(database_bytes * 100 / capacity_bytes, 1)
+    if usage_percent >= 95:
+        level = "CRITICO"
+    elif usage_percent >= 85:
+        level = "ALTO"
+    elif usage_percent >= 70:
+        level = "ATENCAO"
+    else:
+        level = "SAUDAVEL"
+
+    keep_recent = _storage_keep_recent_runs(connection)
+    protected_rows = connection.execute(
+        "SELECT id FROM import_runs WHERE status<>'ARCHIVED' ORDER BY id DESC LIMIT ?",
+        (keep_recent,),
+    ).fetchall()
+    protected_ids = {int(row["id"]) for row in protected_rows}
+    runs = connection.execute(
+        """SELECT r.*,a.status AS archive_status,a.retained_originals,
+                  a.released_rows,a.created_at AS archived_at
+           FROM import_runs r
+           LEFT JOIN run_archives a ON a.run_id=r.id
+           ORDER BY r.id DESC"""
+    ).fetchall()
+    cycle_rows = []
+    for run in runs:
+        run_id = int(run["id"])
+        counts = per_run.get(run_id, {})
+        estimated_bytes = sum(
+            round(table_bytes[table] * counts.get(table, 0) / table_counts[table])
+            for table in RUN_DATA_TABLES
+            if table_counts.get(table)
+        )
+        cycle_rows.append({
+            "id": run_id,
+            "status": run["status"],
+            "started_at": _json_value(run["started_at"]),
+            "finished_at": _json_value(run["finished_at"]),
+            "archive_status": run.get("archive_status"),
+            "protected": run_id in protected_ids or run["status"] != "SUCCESS",
+            "record_count": sum(counts.values()),
+            "source_records": counts.get("source_records", 0),
+            "estimated_bytes": estimated_bytes,
+            "retained_originals": int(run.get("retained_originals") or 0),
+            "released_rows": int(run.get("released_rows") or 0),
+        })
+    return {
+        "database_bytes": database_bytes,
+        "capacity_bytes": capacity_bytes,
+        "available_bytes": max(0, capacity_bytes - database_bytes),
+        "usage_percent": usage_percent,
+        "level": level,
+        "keep_recent_runs": keep_recent,
+        "operational_bytes": sum(table_bytes.values()),
+        "cycles": cycle_rows,
+    }
 
 
 def _scoped_filters(values: dict[str, Any]) -> dict[str, Any]:
@@ -523,6 +643,13 @@ def _start_reconciliation_workflow(batch_id: int) -> str:
     from workflow.imports import start_reconciliation
 
     run = _run_coroutine(start_reconciliation(batch_id))
+    return str(run.run_id)
+
+
+def _start_retention_workflow(run_id: int) -> str:
+    from workflow.imports import start_retention
+
+    run = _run_coroutine(start_retention(run_id))
     return str(run.run_id)
 
 
@@ -958,6 +1085,181 @@ def health():
     return jsonify({"ok": True, "queue": "vercel-workflow", "database": "neon-or-sqlite"})
 
 
+@app.get("/api/admin/storage")
+def storage_overview():
+    connection = connect()
+    try:
+        return jsonify(_storage_snapshot(connection))
+    finally:
+        connection.close()
+
+
+@app.put("/api/admin/storage/policy")
+def update_storage_policy():
+    data = request.get_json(silent=True) or {}
+    try:
+        keep_recent = int(data.get("keep_recent_runs"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Informe uma quantidade válida de ciclos."}), 400
+    if not 1 <= keep_recent <= 20:
+        return jsonify({"error": "A retenção deve ficar entre 1 e 20 ciclos."}), 400
+    connection = connect()
+    try:
+        previous = _storage_keep_recent_runs(connection)
+        connection.execute(
+            """INSERT INTO app_settings(key,value,updated_at)
+               VALUES ('storage_keep_recent_runs',?,CURRENT_TIMESTAMP)
+               ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP""",
+            (str(keep_recent),),
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+    _audit(
+        "UPDATE_RETENTION_POLICY", "STORAGE", entity_type="SETTING",
+        entity_id="storage_keep_recent_runs", old_value=previous,
+        new_value=keep_recent,
+    )
+    return jsonify({"ok": True, "keep_recent_runs": keep_recent})
+
+
+@app.post("/api/admin/storage/archive/<int:run_id>")
+def archive_import_run(run_id: int):
+    data = request.get_json(silent=True) or {}
+    if str(data.get("confirmation") or "").strip() != f"ARQUIVAR {run_id}":
+        return jsonify({"error": f"Confirme a operação informando ARQUIVAR {run_id}."}), 400
+
+    connection = connect()
+    try:
+        run = connection.execute("SELECT * FROM import_runs WHERE id=?", (run_id,)).fetchone()
+        if run is None:
+            return jsonify({"error": "Ciclo não encontrado."}), 404
+        existing = connection.execute(
+            "SELECT * FROM run_archives WHERE run_id=?", (run_id,)
+        ).fetchone()
+        if existing is not None:
+            if existing["status"] in {"QUEUED", "PROCESSING"}:
+                return jsonify({
+                    "ok": True, "archive": _row_dict(existing),
+                    "message": "O arquivamento deste ciclo já está em andamento.",
+                }), 202
+            return jsonify({"error": "Este ciclo já possui uma tentativa de arquivamento."}), 409
+        if run["status"] != "SUCCESS":
+            return jsonify({"error": "Somente ciclos concluídos podem ser arquivados."}), 409
+        keep_recent = _storage_keep_recent_runs(connection)
+        protected = connection.execute(
+            "SELECT id FROM import_runs WHERE status<>'ARCHIVED' ORDER BY id DESC LIMIT ?",
+            (keep_recent,),
+        ).fetchall()
+        if run_id in {int(row["id"]) for row in protected}:
+            return jsonify({
+                "error": f"Este ciclo está protegido pela política dos {keep_recent} mais recentes."
+            }), 409
+        jobs = connection.execute(
+            """SELECT id,source,source_file,blob_path,file_sha256,file_size,status,
+                      processed_rows,inserted_rows,duplicate_rows,error_rows,total_rows,
+                      created_at,finished_at
+               FROM import_jobs WHERE run_id=? ORDER BY id""",
+            (run_id,),
+        ).fetchall()
+        originals = [row for row in jobs if str(row.get("blob_path") or "").strip()]
+        if not originals:
+            return jsonify({
+                "error": "O ciclo não possui arquivos originais privados; arquivamento bloqueado."
+            }), 409
+        per_run, _totals = _run_row_counts(connection)
+        counts = per_run.get(run_id, {})
+    finally:
+        connection.close()
+
+    manifest = {
+        "version": 1,
+        "run_id": run_id,
+        "archived_at": datetime.now(timezone.utc).isoformat(),
+        "run": _row_dict(run),
+        "row_counts": counts,
+        "original_files": [_row_dict(row) for row in originals],
+        "restore_instruction": "Recriar um ciclo e reprocessar os arquivos privados relacionados.",
+    }
+    manifest_content = json.dumps(
+        manifest, ensure_ascii=False, default=str, separators=(",", ":")
+    ).encode("utf-8")
+    manifest_checksum = hashlib.sha256(manifest_content).hexdigest()
+    manifest_path = _store_private_backup(
+        manifest_content,
+        f"archives/run-{run_id}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json",
+    )
+
+    connection = connect()
+    try:
+        archive = connection.execute(
+            """INSERT INTO run_archives(
+                   run_id,requested_by,manifest_path,manifest_checksum,status,
+                   retained_originals,released_rows,details_json
+               ) VALUES (?,?,?,?, 'QUEUED',?,0,?) RETURNING *""",
+            (
+                run_id, int(_current_user()["id"]), manifest_path, manifest_checksum,
+                len(originals),
+                json.dumps({"row_counts": counts}, ensure_ascii=False),
+            ),
+        ).fetchone()
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+    try:
+        workflow_run_id = _start_retention_workflow(run_id)
+    except Exception as error:
+        message = _safe_error(error)
+        connection = connect()
+        try:
+            connection.execute(
+                "UPDATE run_archives SET status='FAILED',details_json=? WHERE run_id=?",
+                (json.dumps({"error": message}, ensure_ascii=False), run_id),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        return jsonify({"error": message, "run_id": run_id}), 503
+
+    connection = connect()
+    try:
+        connection.execute(
+            "UPDATE run_archives SET workflow_run_id=? WHERE run_id=?",
+            (workflow_run_id, run_id),
+        )
+        connection.commit()
+        archive = connection.execute(
+            "SELECT * FROM run_archives WHERE run_id=?", (run_id,)
+        ).fetchone()
+    finally:
+        connection.close()
+
+    _audit(
+        "QUEUE_IMPORT_RUN_ARCHIVE", "STORAGE", entity_type="IMPORT_RUN", entity_id=run_id,
+        new_value={
+            "retained_originals": len(originals), "manifest_checksum": manifest_checksum,
+            "workflow_run_id": workflow_run_id,
+        },
+        justification=str(data.get("justification") or "Retenção administrativa de armazenamento."),
+        critical=False,
+    )
+    return jsonify({
+        "ok": True,
+        "archive": {
+            "id": archive["id"], "run_id": run_id, "status": archive["status"],
+            "retained_originals": len(originals), "released_rows": 0,
+            "workflow_run_id": workflow_run_id,
+        },
+    }), 202
+
+
 @app.get("/api/dashboard")
 def dashboard():
     try:
@@ -1379,6 +1681,49 @@ def upload_data():
                 extra={"source": source, "upload_filename": secure_filename(upload.filename)},
             )
 
+    file_content = upload.stream.read()
+    upload.stream.seek(0)
+    file_sha256 = hashlib.sha256(file_content).hexdigest()
+    file_size = len(file_content)
+    actor = _current_user()
+
+    # Establish the cycle before sending bytes to Blob, then reuse an existing
+    # job when the same source/file was already uploaded to this cycle.
+    connection = connect()
+    try:
+        batch = _get_or_create_batch(connection, actor)
+        duplicate = connection.execute(
+            """SELECT * FROM import_jobs
+               WHERE batch_id=? AND source=? AND file_sha256=?
+                 AND status<>'SUPERSEDED'
+               ORDER BY id DESC LIMIT 1""",
+            (batch["id"], source, file_sha256),
+        ).fetchone()
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+    if duplicate is not None:
+        payload = _job_payload(duplicate)
+        payload.update({
+            "ok": True,
+            "job_id": duplicate["id"],
+            "batch_id": duplicate["batch_id"],
+            "run_id": duplicate["run_id"],
+            "file": duplicate["source_file"],
+            "duplicate_upload": True,
+            "message": "Este arquivo já foi enviado para a fonte neste ciclo; o job existente foi reutilizado.",
+        })
+        _audit(
+            "IMPORT_DUPLICATE_BLOCKED", "IMPORTS", entity_type="IMPORT_JOB",
+            entity_id=duplicate["id"], new_value={"source": source, "file_sha256": file_sha256},
+            critical=False,
+        )
+        return jsonify(payload), 200
+
     from vercel.blob import BlobClient
 
     pathname = f"sisdev/{source}/{secure_filename(upload.filename)}"
@@ -1393,8 +1738,6 @@ def upload_data():
 
     connection = connect()
     try:
-        actor = _current_user()
-        batch = _get_or_create_batch(connection, actor)
         created_by, scope_centers_json, scope_properties_json = _scope_snapshot(actor)
         connection.execute(
             """UPDATE import_jobs SET status='SUPERSEDED',finished_at=CURRENT_TIMESTAMP,
@@ -1405,8 +1748,8 @@ def upload_data():
         job = connection.execute(
             """INSERT INTO import_jobs(
                    batch_id,run_id,created_by,scope_centers_json,scope_properties_json,
-                   source,source_file,blob_path,blob_url,status
-               ) VALUES (?,?,?,?,?,?,?,?,?,'QUEUED') RETURNING *""",
+                   source,source_file,blob_path,blob_url,file_sha256,file_size,status
+               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,'QUEUED') RETURNING *""",
             (
                 batch["id"],
                 batch["run_id"],
@@ -1417,6 +1760,8 @@ def upload_data():
                 secure_filename(upload.filename),
                 blob.pathname,
                 blob.download_url or blob.url,
+                file_sha256,
+                file_size,
             ),
         ).fetchone()
         connection.execute(
@@ -1443,7 +1788,7 @@ def upload_data():
         "IMPORT_UPLOAD", "IMPORTS", entity_type="IMPORT_JOB", entity_id=job["id"],
         new_value={
             "source": source, "file": secure_filename(upload.filename),
-            "size": request.content_length, "batch_id": batch["id"],
+            "size": file_size, "file_sha256": file_sha256, "batch_id": batch["id"],
         },
     )
     return jsonify(payload), 201

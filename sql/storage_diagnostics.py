@@ -32,11 +32,14 @@ def main() -> None:
             )
         for row in connection.execute(
             """SELECT indexrelname,relname,pg_relation_size(indexrelid),
-                      pg_size_pretty(pg_relation_size(indexrelid))
+                      pg_size_pretty(pg_relation_size(indexrelid)),idx_scan
                FROM pg_stat_user_indexes
                ORDER BY pg_relation_size(indexrelid) DESC LIMIT 20"""
         ):
-            print(f"INDEX name={row[0]} table={row[1]} bytes={row[2]} pretty={row[3]}")
+            print(
+                f"INDEX name={row[0]} table={row[1]} bytes={row[2]} "
+                f"pretty={row[3]} scans={row[4]}"
+            )
         counts = connection.execute(
             """SELECT
                  (SELECT COUNT(*) FROM import_runs),

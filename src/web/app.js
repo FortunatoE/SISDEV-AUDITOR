@@ -93,6 +93,7 @@ const state = {
   workQueuePriority: '',
   workQueueAssignee: '',
   workQueueDueStatus: '',
+  storageTimer: 0,
 };
 
 class ApiError extends Error {
@@ -125,6 +126,14 @@ function asNumber(value, fallback = 0) {
 
 function formatNumber(value) {
   return asNumber(value).toLocaleString('pt-BR', { maximumFractionDigits: 3 });
+}
+
+function formatBytes(value) {
+  let size = Math.max(0, asNumber(value));
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) { size /= 1024; index += 1; }
+  return `${size.toLocaleString('pt-BR', { maximumFractionDigits: index ? 1 : 0 })} ${units[index]}`;
 }
 
 function formatLabel(value) {
@@ -498,6 +507,99 @@ async function loadImportHealth() {
   }
 }
 
+function renderStorageOverview(data) {
+  const levelClass = data.level === 'CRITICO' ? 'health-failed' : data.level === 'ALTO' ? 'health-waiting' : 'health-ok';
+  $('storage-metrics').replaceChildren(
+    importHealthMetric('Uso do banco', `${formatNumber(data.usage_percent)}%`, levelClass),
+    importHealthMetric('Ocupado', formatBytes(data.database_bytes)),
+    importHealthMetric('Disponível', formatBytes(data.available_bytes), data.available_bytes < 32 * 1024 * 1024 ? 'health-failed' : 'health-ok'),
+    importHealthMetric('Dados operacionais', formatBytes(data.operational_bytes)),
+    importHealthMetric('Situação', formatLabel(data.level), levelClass),
+  );
+  $('storage-keep-runs').value = String(data.keep_recent_runs || 3);
+  $('storage-notice').textContent = data.level === 'CRITICO'
+    ? 'Capacidade crítica. Arquive um ciclo antigo elegível ou amplie o plano antes da próxima importação.'
+    : data.level === 'ALTO'
+      ? 'O armazenamento exige atenção. Revise os ciclos antigos antes da próxima carga grande.'
+      : 'Armazenamento dentro da política configurada.';
+
+  const body = $('storage-cycle-body');
+  body.replaceChildren();
+  const cycles = Array.isArray(data.cycles) ? data.cycles : [];
+  if (!cycles.length) {
+    body.append(create('tr', {}, create('td', { colSpan: 8, text: 'Nenhum ciclo de importação encontrado.' })));
+    return;
+  }
+  for (const cycle of cycles) {
+    const archived = cycle.status === 'ARCHIVED' || cycle.archive_status === 'COMPLETED';
+    const archiving = ['QUEUED', 'PROCESSING'].includes(cycle.archive_status);
+    const action = create('button', {
+      type: 'button',
+      className: archived ? 'secondary compact-action' : 'danger compact-action',
+      text: archived ? 'Arquivado' : archiving ? 'Arquivando...' : cycle.archive_status === 'FAILED' ? 'Falhou' : 'Arquivar',
+      disabled: Boolean(cycle.protected || archived || archiving || cycle.archive_status === 'FAILED'),
+    });
+    if (!action.disabled) action.addEventListener('click', () => archiveStorageCycle(cycle));
+    body.append(create('tr', {}, [
+      create('td', { text: `#${cycle.id}` }),
+      create('td', {}, create('span', { className: `tag ${archived ? 'completed' : ''}`.trim(), text: formatLabel(cycle.status) })),
+      create('td', { text: displayValue('started_at', cycle.started_at) }),
+      create('td', { text: formatNumber(cycle.record_count) }),
+      create('td', { text: `${formatNumber(cycle.source_records)} linhas` }),
+      create('td', { text: formatBytes(cycle.estimated_bytes), title: 'Estimativa proporcional ao espaço das tabelas.' }),
+      create('td', { text: archived ? `${formatNumber(cycle.retained_originals)} originais preservados` : cycle.protected ? 'Ciclo recente protegido' : 'Elegível para arquivamento' }),
+      create('td', {}, action),
+    ]));
+  }
+  window.clearTimeout(state.storageTimer);
+  if (state.current === 'storage_admin' && cycles.some((cycle) => ['QUEUED', 'PROCESSING'].includes(cycle.archive_status))) {
+    state.storageTimer = window.setTimeout(loadStorageOverview, 5_000);
+  }
+}
+
+async function loadStorageOverview() {
+  $('storage-notice').textContent = 'Medindo o armazenamento...';
+  try {
+    const data = await requestJson('/api/admin/storage', { method: 'GET' }, 45_000);
+    if (state.current === 'storage_admin') renderStorageOverview(data);
+  } catch (error) {
+    if (state.current === 'storage_admin') $('storage-notice').textContent = error.message;
+  }
+}
+
+async function saveStoragePolicy() {
+  const button = $('save-storage-policy');
+  button.disabled = true;
+  try {
+    await requestJson('/api/admin/storage/policy', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keep_recent_runs: Number($('storage-keep-runs').value) }),
+    }, 20_000);
+    $('storage-notice').textContent = 'Política de retenção atualizada e registrada na auditoria.';
+    await loadStorageOverview();
+  } catch (error) {
+    $('storage-notice').textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function archiveStorageCycle(cycle) {
+  const confirmation = window.prompt(`Para arquivar o ciclo #${cycle.id}, digite ARQUIVAR ${cycle.id}. Os arquivos originais privados serão preservados.`);
+  if (confirmation !== `ARQUIVAR ${cycle.id}`) return;
+  $('storage-notice').textContent = `Arquivando o ciclo #${cycle.id}...`;
+  try {
+    const data = await requestJson(`/api/admin/storage/archive/${encodeURIComponent(cycle.id)}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirmation, justification: 'Retenção administrativa pelo painel de armazenamento.' }),
+    }, 180_000);
+    $('storage-notice').textContent = `Arquivamento do ciclo #${cycle.id} iniciado em segundo plano. O progresso será atualizado automaticamente.`;
+    await loadStorageOverview();
+  } catch (error) {
+    $('storage-notice').textContent = error.message;
+  }
+}
+
 function populateLotTraceOptions(options = []) {
   const list = $('lot-trace-options');
   state.lotTraceOptions = new Map();
@@ -678,7 +780,12 @@ async function uploadFile(source, button) {
     form.append('file', file);
     const data = await requestJson('/api/upload', { method: 'POST', body: form }, 180_000);
     if (!data.job_id && !data.id) throw new ApiError('O servidor recebeu o arquivo, mas não criou o job de importação.');
-    mergeJob(source.id, { ...data, id: data.job_id || data.id, file: data.file || file.name, status: data.status || 'QUEUED', processed_rows: 0, total_rows: 0, error_message: '' });
+    mergeJob(source.id, {
+      ...data, id: data.job_id || data.id, file: data.file || file.name,
+      status: data.status || 'QUEUED', processed_rows: data.processed_rows ?? 0,
+      total_rows: data.total_rows ?? 0, error_message: data.error_message || '',
+    });
+    if (data.duplicate_upload) $(`state-${source.id}`).textContent = data.message;
   } catch (error) {
     $(`state-${source.id}`).textContent = error.message;
   } finally {
@@ -1749,10 +1856,12 @@ function updateViewVisibility(page) {
   $('uploads-view').hidden = page !== 'uploads';
   $('import-health-view').hidden = page !== 'import_health';
   $('lot-trace-view').hidden = page !== 'lot_trace';
+  $('storage-view').hidden = page !== 'storage_admin';
   $('dashboard-view').hidden = page !== 'dashboard';
-  $('page-view').hidden = ['dashboard', 'uploads', 'import_health', 'lot_trace'].includes(page);
-  $('filters').hidden = ['uploads', 'import_health', 'lot_trace'].includes(page);
+  $('page-view').hidden = ['dashboard', 'uploads', 'import_health', 'lot_trace', 'storage_admin'].includes(page);
+  $('filters').hidden = ['uploads', 'import_health', 'lot_trace', 'storage_admin'].includes(page);
   if (page !== 'import_health') window.clearTimeout(state.importHealthTimer);
+  if (page !== 'storage_admin') window.clearTimeout(state.storageTimer);
   if (page !== 'dashboard') $('notice').hidden = true;
 }
 
@@ -1777,7 +1886,7 @@ function configureFilters(page) {
 }
 
 async function navigate(page, updateHistory = true) {
-  const validPage = ['dashboard', 'uploads', 'import_health', 'lot_trace'].includes(page) || PAGE_CONFIG[page] ? page : 'dashboard';
+  const validPage = ['dashboard', 'uploads', 'import_health', 'lot_trace', 'storage_admin'].includes(page) || PAGE_CONFIG[page] ? page : 'dashboard';
   state.current = validPage;
   state.page = 1;
   state.sort = '';
@@ -1786,7 +1895,7 @@ async function navigate(page, updateHistory = true) {
   updateViewVisibility(validPage);
   configureFilters(validPage);
   const config = PAGE_CONFIG[validPage];
-  $('title').textContent = validPage === 'dashboard' ? 'Dashboard' : validPage === 'uploads' ? 'Importar arquivos' : validPage === 'import_health' ? 'Saúde das importações' : validPage === 'lot_trace' ? 'Rastreabilidade de lote' : config.title;
+  $('title').textContent = validPage === 'dashboard' ? 'Dashboard' : validPage === 'uploads' ? 'Importar arquivos' : validPage === 'import_health' ? 'Saúde das importações' : validPage === 'lot_trace' ? 'Rastreabilidade de lote' : validPage === 'storage_admin' ? 'Armazenamento' : config.title;
   $('subtitle').textContent = validPage === 'dashboard'
     ? 'Visão geral da auditoria e conciliação de movimentações de químicos'
     : validPage === 'uploads'
@@ -1795,6 +1904,8 @@ async function navigate(page, updateHistory = true) {
         ? 'Visão operacional do ciclo atual e das fontes que exigem atenção'
       : validPage === 'lot_trace'
         ? 'Linha cronológica de documentos e movimentos por produto e lote'
+      : validPage === 'storage_admin'
+        ? 'Capacidade do Neon, retenção e arquivamento seguro por ciclo'
       : config.description;
   if (updateHistory && window.location.hash !== `#${validPage}`) history.pushState({ page: validPage }, '', `#${validPage}`);
   if (validPage === 'dashboard') await loadDashboard();
@@ -1806,6 +1917,7 @@ async function navigate(page, updateHistory = true) {
     await loadLotTraceOptions($('lot-trace-search').value.trim());
     if (state.lotTraceSelection) await searchLotTrace(false);
   }
+  else if (validPage === 'storage_admin') await loadStorageOverview();
   else await loadPage(validPage);
 }
 
@@ -1826,6 +1938,7 @@ function applyAccess() {
     if (page === 'uploads') allowed = permissions.has('*') || permissions.has('import');
     if (page === 'import_health') allowed = permissions.has('*') || permissions.has('import');
     if (page === 'users') allowed = permissions.has('*') || permissions.has('manage_users');
+    if (page === 'storage_admin') allowed = permissions.has('*') || permissions.has('manage_backup');
     link.hidden = !allowed;
   }
   $('current-user').textContent = `${user.display_name} · ${formatLabel(user.profile)}`;
@@ -1924,6 +2037,8 @@ async function refreshCurrentView() {
       await loadImportHealth();
     } else if (state.current === 'lot_trace') {
       await searchLotTrace(false);
+    } else if (state.current === 'storage_admin') {
+      await loadStorageOverview();
     } else if (state.current === 'dashboard') await loadDashboard();
     else await loadPage(state.current);
   } finally {
@@ -1963,6 +2078,8 @@ function installEvents() {
   $('refresh-data').addEventListener('click', refreshCurrentView);
   $('process-upload').addEventListener('click', reconcileCompleted);
   $('refresh-import-health').addEventListener('click', loadImportHealth);
+  $('refresh-storage').addEventListener('click', loadStorageOverview);
+  $('save-storage-policy').addEventListener('click', saveStoragePolicy);
   $('open-uploads').addEventListener('click', () => navigate('uploads'));
   $('search-lot-trace').addEventListener('click', () => searchLotTrace(true));
   $('lot-trace-search').addEventListener('input', () => {

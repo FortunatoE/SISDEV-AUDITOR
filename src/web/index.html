@@ -55,6 +55,7 @@
       <a href="#history" data-page="history">▱ Histórico</a>
       <a href="#logs" data-page="logs">▤ Logs</a>
       <a href="#users" data-page="users">♟ Usuários</a>
+      <a href="#storage_admin" data-page="storage_admin">▣ Armazenamento</a>
     </nav>
 
     <footer>Fase C · Copiloto/Auditor<br><i></i> Automação monitorada</footer>
@@ -135,6 +136,40 @@
           <table>
             <thead><tr><th>Fonte</th><th>Status</th><th>Progresso</th><th>Inseridas</th><th>Duplicadas</th><th>Erros</th><th>Duração</th><th>Última atividade</th><th>Próxima ação</th></tr></thead>
             <tbody id="import-health-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+    <section id="storage-view" hidden class="storage-view">
+      <div class="import-health-heading">
+        <div>
+          <h2>Gestão de armazenamento</h2>
+          <p>Consumo do Neon, retenção dos ciclos e arquivamento seguro dos dados derivados.</p>
+        </div>
+        <button id="refresh-storage" type="button">Atualizar medição</button>
+      </div>
+      <section id="storage-metrics" class="import-health-metrics" aria-label="Resumo do armazenamento"></section>
+      <section class="panel storage-policy-panel">
+        <div>
+          <h2>Política de retenção</h2>
+          <p>Os arquivos originais permanecem privados no Blob. Os ciclos mais recentes nunca podem ser arquivados.</p>
+        </div>
+        <label>Manter ciclos recentes
+          <input id="storage-keep-runs" type="number" min="1" max="20" value="3">
+        </label>
+        <button id="save-storage-policy" type="button">Salvar política</button>
+      </section>
+      <div id="storage-notice" class="notice" role="status" aria-live="polite"></div>
+      <section class="panel import-health-table-panel">
+        <div class="import-health-table-heading">
+          <h2>Ciclos de importação</h2>
+          <span>Arquivamento manual e auditado</span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Ciclo</th><th>Status</th><th>Início</th><th>Registros</th><th>Origem</th><th>Espaço estimado</th><th>Proteção</th><th>Ação</th></tr></thead>
+            <tbody id="storage-cycle-body"></tbody>
           </table>
         </div>
       </section>

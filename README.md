@@ -25,14 +25,16 @@ Principais melhorias entregues:
 - cálculo inteligente do saldo: `OK`, `SALDO_PARCIAL` e `SEM_SALDO`;
 - trilha de auditoria para autenticação, importação, exportação, cadastros, mapeamentos e tratamento de pendências;
 - uploads validados e arquivos originais privados no Vercel Blob;
+- bloqueio de upload duplicado por hash dentro do mesmo ciclo, reutilizando o job existente;
 - backup privado de configurações com verificação e restauração administrativa;
+- painel administrativo de armazenamento, política de retenção e arquivamento auditado por ciclo;
 - processamento assíncrono por fonte com Vercel Workflow e progresso persistido no Neon;
 - Fluid Compute habilitado e fontes grandes divididas em etapas duráveis de até 5.000 linhas, com checkpoints internos a cada 1.000 registros;
 - Central de saúde das importações com prontidão do ciclo, falhas, fontes ausentes, duração, última atividade e próxima ação recomendada;
 - rastreabilidade cronológica por produto e lote, reunindo SAP, SISDEV, receitas e tratamentos com acumulados independentes por sistema e unidade;
 - classificação preparatória `CANDIDATO_AUTOMACAO` ou `REVISAO_HUMANA`, sem executar ações críticas automaticamente.
 
-Validação local desta versão: **65 testes automatizados aprovados**, incluindo saúde do ciclo, linha do tempo por lote, fila gerencial, separação entre login e migrações, retomada durável de importações, agrupamento por NF/lote, detalhamento sob demanda, validação das receitas escolhidas, autorização, isolamento por centro, ownership de importações e auditoria das decisões.
+Validação local desta versão: **71 testes automatizados aprovados**, incluindo saúde do ciclo, deduplicação de upload, retenção protegida, arquivamento de ciclos, linha do tempo por lote, fila gerencial, separação entre login e migrações, retomada durável de importações, agrupamento por NF/lote, detalhamento sob demanda, autorização, isolamento por centro, ownership de importações e auditoria das decisões.
 
 ### Reforço de segurança desta versão
 
@@ -196,6 +198,7 @@ vercel.json                   roteamento e limites da Function
 - `document_decisions`: seleção/confirmação/rejeição humana por documento.
 - `work_items` / `work_item_comments`: andamento, responsável, prioridade, prazo e colaboração na fila diária.
 - `reconciliation_mappings` / `app_settings`: premissas e mapeamentos configuráveis.
+- `run_archives`: manifesto privado, integridade e quantidade liberada em cada arquivamento.
 
 Em produção, `Acompanhamento SISDEV.xlsx` e o PBIX **não são fontes de dados**. A estrutura histórica serviu como referência para regras e colunas; os registros usados são exclusivamente os arquivos enviados e persistidos no Neon.
 
@@ -227,6 +230,9 @@ Em produção, `Acompanhamento SISDEV.xlsx` e o PBIX **não são fontes de dados
 | `POST /api/admin/backups` | Cria snapshot privado de configurações |
 | `POST /api/admin/backups/{id}/restore-test` | Valida integridade e legibilidade do snapshot |
 | `POST /api/admin/backups/{id}/restore` | Restaura snapshot com confirmação e justificativa |
+| `GET /api/admin/storage` | Mede uso do banco e lista ciclos protegidos/elegíveis |
+| `PUT /api/admin/storage/policy` | Define quantos ciclos recentes devem permanecer protegidos |
+| `POST /api/admin/storage/archive/{run_id}` | Preserva manifesto/originais e remove dados derivados do ciclo antigo |
 | `GET/POST /api/settings/rt-preference` | Preferência de RT |
 | `GET/POST /api/mappings` | Premissas e mapeamentos |
 | `GET /api/health` | Saúde básica da API |
@@ -240,6 +246,7 @@ DATABASE_URL=<conexão pooled do Neon>
 BLOB_READ_WRITE_TOKEN=<token do Vercel Blob>
 SISDEV_SECRET_KEY=<segredo aleatório longo para assinar a sessão>
 SISDEV_AUTO_MIGRATE=0
+SISDEV_NEON_STORAGE_LIMIT_BYTES=536870912
 SISDEV_BOOTSTRAP_ADMIN_EMAIL=<usuário ou e-mail do primeiro administrador>
 SISDEV_BOOTSTRAP_ADMIN_PASSWORD=<senha inicial forte>
 SISDEV_BOOTSTRAP_ADMIN_NAME=<nome opcional>
@@ -259,6 +266,7 @@ sql/security_access.sql
 sql/session_audit_hardening.sql
 sql/regularization_queue.sql
 sql/work_queue.sql
+sql/storage_retention.sql
 ```
 
 Os scripts são idempotentes e podem ser reaplicados em atualizações de schema. Use conexão direta para a migração e a conexão pooled para a aplicação.
@@ -266,6 +274,8 @@ Os scripts são idempotentes e podem ser reaplicados em atualizações de schema
 Em produção, mantenha `SISDEV_AUTO_MIGRATE=0`: nenhuma requisição — inclusive login — deve executar DDL. As migrações são uma etapa administrativa explícita, evitando indisponibilidade quando o banco estiver próximo do limite de armazenamento.
 
 Se o Neon atingir a cota, execute `sql/storage_emergency_recovery.sql`. O script remove somente um índice redundante de `source_records`, preservando os dados operacionais. A validação de sessão também limita a atualização de atividade a uma vez a cada cinco minutos e trata essa gravação como auxiliar, mantendo as consultas disponíveis mesmo durante uma falha temporária de escrita.
+
+O painel **Armazenamento** é exclusivo do administrador. Por padrão, os três ciclos mais recentes ficam protegidos. Ao arquivar um ciclo elegível, a aplicação grava primeiro um manifesto privado no Blob com os arquivos originais, hashes e contagens; somente depois remove os registros derivados daquele `run_id`. Jobs, arquivos originais e trilha de auditoria são preservados. A ação exige confirmação textual e não é automática.
 
 ## Desenvolvimento e testes
 

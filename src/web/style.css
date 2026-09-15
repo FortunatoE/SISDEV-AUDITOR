@@ -487,6 +487,32 @@ td { max-width: 360px; padding: 10px 6px; border-bottom: 1px solid #183144; over
   color: #aabcc9;
 }
 
+.storage-view { min-width: 0; }
+.storage-policy-panel {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) 190px auto;
+  gap: 18px;
+  align-items: end;
+  margin-bottom: 14px;
+}
+.storage-policy-panel h2 { margin-bottom: 4px; }
+.storage-policy-panel p { margin: 0; color: #9fb1bf; }
+.storage-policy-panel label { color: #aabcc9; font-size: 11px; }
+.storage-policy-panel input {
+  display: block;
+  width: 100%;
+  margin-top: 5px;
+  padding: 9px;
+  color: #e8f0f7;
+  background: #0d2032;
+  border: 1px solid #244056;
+  border-radius: 5px;
+}
+.storage-view .notice { margin: 0 0 14px; }
+@media (max-width: 800px) {
+  .storage-policy-panel { grid-template-columns: 1fr; align-items: stretch; }
+}
+
 .page-panel { min-width: 0; }
 .page-heading-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
 .page-heading-row h2 { margin-bottom: 4px; }

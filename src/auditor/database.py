@@ -150,6 +150,8 @@ IMPORT_JOB_COLUMNS: dict[str, str] = {
     "source_file": "TEXT",
     "blob_path": "TEXT",
     "blob_url": "TEXT",
+    "file_sha256": "TEXT",
+    "file_size": "BIGINT NOT NULL DEFAULT 0",
     "status": "TEXT NOT NULL DEFAULT 'QUEUED'",
     "cursor_row": "INTEGER NOT NULL DEFAULT 0",
     "batch_size": "INTEGER NOT NULL DEFAULT 1000",
@@ -325,6 +327,21 @@ def _security_create_statements(id_type: str, timestamp_type: str) -> list[str]:
             restored_at {timestamp_type},
             restore_result TEXT
         )""",
+        f"""CREATE TABLE IF NOT EXISTS run_archives (
+            id {id_type} PRIMARY KEY,
+            run_id BIGINT NOT NULL UNIQUE,
+            requested_by BIGINT NOT NULL REFERENCES app_users(id),
+            manifest_path TEXT NOT NULL,
+            manifest_checksum TEXT NOT NULL,
+            status TEXT NOT NULL,
+            workflow_run_id TEXT,
+            processed_table TEXT,
+            retained_originals INTEGER NOT NULL DEFAULT 0,
+            released_rows INTEGER NOT NULL DEFAULT 0,
+            details_json TEXT,
+            created_at {timestamp_type} NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            completed_at {timestamp_type}
+        )""",
         f"""CREATE TABLE IF NOT EXISTS document_decisions (
             id {id_type} PRIMARY KEY,
             run_id BIGINT NOT NULL,
@@ -379,7 +396,8 @@ POSTGRES_BATCH_ALTERS = [
 INDEX_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS expected_movements_document_idx ON expected_movements(run_id, nf, series, cnpj, direction, center)",
     "CREATE INDEX IF NOT EXISTS expected_movements_match_idx ON expected_movements(run_id, direction, material_key, doc_date)",
-    "CREATE INDEX IF NOT EXISTS actual_movements_document_idx ON actual_movements(run_id, nf, series)",
+    # Consultas SISDEV atuais percorrem a execução ou usam a chave primária; o
+    # índice antigo (run_id, nf, series) consumia espaço sem atender uma rota.
     "CREATE INDEX IF NOT EXISTS reconciliations_run_status_idx ON reconciliations(run_id, status, expected_id, actual_id)",
     "CREATE INDEX IF NOT EXISTS reconciliations_expected_idx ON reconciliations(expected_id, run_id)",
     "CREATE INDEX IF NOT EXISTS reconciliations_run_expected_idx ON reconciliations(run_id, expected_id)",
@@ -387,6 +405,7 @@ INDEX_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS import_jobs_batch_source_idx ON import_jobs(batch_id, source, created_at)",
     "CREATE INDEX IF NOT EXISTS import_jobs_workflow_idx ON import_jobs(workflow_run_id)",
     "CREATE INDEX IF NOT EXISTS import_jobs_owner_status_idx ON import_jobs(created_by, status, created_at)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS import_jobs_batch_source_hash_idx ON import_jobs(batch_id, source, file_sha256)",
     "CREATE INDEX IF NOT EXISTS import_batches_owner_status_idx ON import_batches(created_by, status, created_at)",
     "CREATE INDEX IF NOT EXISTS import_job_events_job_idx ON import_job_events(job_id, created_at)",
     "CREATE INDEX IF NOT EXISTS reconciliation_mappings_type_idx ON reconciliation_mappings(mapping_type, status)",
@@ -397,6 +416,7 @@ INDEX_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS login_attempts_identity_idx ON login_attempts(email, ip_address, created_at)",
     "CREATE INDEX IF NOT EXISTS audit_log_created_idx ON audit_log(created_at)",
     "CREATE INDEX IF NOT EXISTS audit_log_user_idx ON audit_log(user_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS run_archives_status_idx ON run_archives(status, created_at)",
     "CREATE INDEX IF NOT EXISTS document_decisions_document_idx ON document_decisions(run_id, document_key, updated_at)",
     "CREATE INDEX IF NOT EXISTS work_items_queue_idx ON work_items(run_id, status, priority, due_date)",
     "CREATE INDEX IF NOT EXISTS work_items_center_idx ON work_items(center, assigned_to, updated_at)",
@@ -511,6 +531,11 @@ def _ensure_postgres_schema(connection: Any) -> None:
                VALUES ('preferred_rt', 'KARLA DANIELLY GARCIA DE LIMA')
                ON CONFLICT(key) DO NOTHING"""
         )
+        cursor.execute(
+            """INSERT INTO app_settings(key, value)
+               VALUES ('storage_keep_recent_runs', '3')
+               ON CONFLICT(key) DO NOTHING"""
+        )
     connection.commit()
 
 
@@ -554,6 +579,11 @@ def _ensure_sqlite_schema(connection: sqlite3.Connection) -> None:
     connection.execute(
         """INSERT INTO app_settings(key, value)
            VALUES ('preferred_rt', 'KARLA DANIELLY GARCIA DE LIMA')
+           ON CONFLICT(key) DO NOTHING"""
+    )
+    connection.execute(
+        """INSERT INTO app_settings(key, value)
+           VALUES ('storage_keep_recent_runs', '3')
            ON CONFLICT(key) DO NOTHING"""
     )
     connection.commit()
