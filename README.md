@@ -29,12 +29,13 @@ Principais melhorias entregues:
 - backup privado de configurações com verificação e restauração administrativa;
 - painel administrativo de armazenamento, política de retenção e arquivamento auditado por ciclo;
 - processamento assíncrono por fonte com Vercel Workflow e progresso persistido no Neon;
+- fila de trabalho persistente no Neon, com leitura de receitas limitada ao período das notas visíveis;
 - Fluid Compute habilitado e fontes grandes divididas em etapas duráveis de até 5.000 linhas, com checkpoints internos a cada 1.000 registros;
 - Central de saúde das importações com prontidão do ciclo, falhas, fontes ausentes, duração, última atividade e próxima ação recomendada;
 - rastreabilidade cronológica por produto e lote, reunindo SAP, SISDEV, receitas e tratamentos com acumulados independentes por sistema e unidade;
 - classificação preparatória `CANDIDATO_AUTOMACAO` ou `REVISAO_HUMANA`, sem executar ações críticas automaticamente.
 
-Validação local desta versão: **71 testes automatizados aprovados**, incluindo saúde do ciclo, deduplicação de upload, retenção protegida, arquivamento de ciclos, linha do tempo por lote, fila gerencial, separação entre login e migrações, retomada durável de importações, agrupamento por NF/lote, detalhamento sob demanda, autorização, isolamento por centro, ownership de importações e auditoria das decisões.
+Validação local desta versão: **72 testes automatizados aprovados**, incluindo saúde do ciclo, deduplicação de upload, retenção protegida, arquivamento de ciclos, linha do tempo por lote, fila gerencial, compatibilidade com cabeçalhos XLS legados, separação entre login e migrações, retomada durável de importações, agrupamento por NF/lote, detalhamento sob demanda, autorização, isolamento por centro, ownership de importações e auditoria das decisões.
 
 ### Reforço de segurança desta versão
 

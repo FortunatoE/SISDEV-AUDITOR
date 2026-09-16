@@ -122,6 +122,28 @@ class EngineUnitTests(unittest.TestCase):
         self.assertEqual(recipe["dose_recomendada"], 60.0)
         self.assertEqual(recipe["quantidade_receita"], 40.0)
 
+    def test_recipe_fields_accept_legacy_xls_replacement_characters(self):
+        raw = {
+            "Data de Emiss�o": "2026-06-01 08:00:00.0",
+            "Diagn�stico": "ALVO TESTE",
+            "N�mero do receitu�rio": "BR2026LEGADO",
+            "Produto": "PRODUTO A",
+            "�rea": "666,67",
+        }
+
+        class RecipeConnection:
+            postgres = False
+
+            def execute(self, query, params):
+                return [{"id": 1, "row_number": 1, "raw_json": json.dumps(raw)}]
+
+        engine.RECIPE_CACHE.clear()
+        recipe = engine._recipes_for_regularization(RecipeConnection(), 987655)[0]
+        self.assertEqual(recipe["data_emissao"], "2026-06-01")
+        self.assertEqual(recipe["diagnostico"], "ALVO TESTE")
+        self.assertEqual(recipe["numero_receita"], "BR2026LEGADO")
+        self.assertEqual(recipe["area_receita"], 666.67)
+
     @unittest.skipUnless((ROOT / "dados" / "Relatório Saldo de Agrotóxico.pdf").exists(), "PDF de exemplo ausente")
     def test_pdf_parser_matches_printed_report_totals(self):
         rows = engine._parse_sisdev_stock_pdf(ROOT / "dados" / "Relatório Saldo de Agrotóxico.pdf")

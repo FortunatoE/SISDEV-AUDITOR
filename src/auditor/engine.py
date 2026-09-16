@@ -410,7 +410,9 @@ def _clear_source(conn, run_id, source):
     conn.execute(f"DELETE FROM actual_movements WHERE source_record_id IN ({source_ids})", (run_id, source))
     conn.execute("DELETE FROM source_records WHERE run_id=? AND source=?", (run_id, source))
     conn.execute("DELETE FROM audit_issues WHERE run_id=? AND reference=?", (run_id, source))
-    RECIPE_CACHE.pop(run_id, None)
+    for cache_key in list(RECIPE_CACHE):
+        if cache_key == run_id or (isinstance(cache_key, tuple) and cache_key[0] == run_id):
+            RECIPE_CACHE.pop(cache_key, None)
 
 
 def _expected_values(run_id, record_id, source, data, manufacturer_lots):
@@ -1088,11 +1090,24 @@ def _recipe_number(value):
     return number(value)
 
 
-def _recipes_for_regularization(conn, run_id):
-    if run_id in RECIPE_CACHE:
-        return RECIPE_CACHE[run_id]
+def _recipes_for_regularization(conn, run_id, accepted_dates=None):
+    accepted_dates = tuple(sorted({text(value)[:10] for value in (accepted_dates or []) if text(value)}))
+    cache_key = (run_id, accepted_dates) if accepted_dates else run_id
+    if cache_key in RECIPE_CACHE:
+        return RECIPE_CACHE[cache_key]
     recipes = []
-    for record in conn.execute("SELECT id,row_number,raw_json FROM source_records WHERE run_id=? AND source='agrotis_recipe' ORDER BY row_number", (run_id,)):
+    query = "SELECT id,row_number,raw_json FROM source_records WHERE run_id=? AND source='agrotis_recipe'"
+    params = [run_id]
+    if accepted_dates and getattr(conn, "postgres", False):
+        placeholders = ",".join("?" for _ in accepted_dates)
+        query += f""" AND EXISTS (
+            SELECT 1 FROM jsonb_each_text(raw_json::jsonb) entry
+            WHERE entry.key ILIKE 'Data de Emiss%%'
+              AND LEFT(entry.value,10) IN ({placeholders})
+        )"""
+        params.extend(accepted_dates)
+    query += " ORDER BY row_number"
+    for record in conn.execute(query, params):
         raw = json.loads(record["raw_json"])
         normalized = {key(column): value for column, value in raw.items()}
 
@@ -1105,19 +1120,19 @@ def _recipes_for_regularization(conn, run_id):
         recipes.append({
             "source_record_id": record.get("id"),
             "row_number": record.get("row_number"),
-            "data_emissao": iso_date(recipe_field("Data de Emissão")),
+            "data_emissao": iso_date(recipe_field("Data de Emissão", "Data de Emiss�o")),
             "produto": text(recipe_field("Produto")),
             "material": text(recipe_field("Material", "Código Material")),
             "lote": lot(recipe_field("Lote", "Lote Fabricante")),
-            "numero_receita": text(recipe_field("Número do receituário")),
+            "numero_receita": text(recipe_field("Número do receituário", "N�mero do receitu�rio")),
             "nota_fiscal": document(recipe_field("Nota Fiscal")),
             "art": text(recipe_field("ART")),
             "nome_rt": text(recipe_field("Nome RT")),
             "cultura": text(recipe_field("Cultura")),
-            "diagnostico": text(recipe_field("Diagnóstico")),
+            "diagnostico": text(recipe_field("Diagnóstico", "Diagn�stico")),
             "dose_recomendada": _recipe_number(recipe_field("Dose")),
             "tipo_dosagem": text(recipe_field("Tipo de Dosagem")),
-            "area_receita": _recipe_number(recipe_field("Área")),
+            "area_receita": _recipe_number(recipe_field("Área", "�rea")),
             "quantidade_receita": _recipe_number(recipe_field("Quantidade")),
             "unidade_receita": unit(recipe_field("Unidade Quantidade")),
             "volume_embalagem": _recipe_number(recipe_field("Volume da Embalagem", "Volume da Embalagens")),
@@ -1126,7 +1141,7 @@ def _recipes_for_regularization(conn, run_id):
             "nome_propriedade": text(recipe_field("Nome da Propriedade")),
             "nome_produtor": text(recipe_field("Nome Produtor")),
         })
-    RECIPE_CACHE[run_id] = recipes
+    RECIPE_CACHE[cache_key] = recipes
     return recipes
 
 
@@ -1322,29 +1337,17 @@ def _return_chain_context(conn, run_id):
 
     exits_by_material = defaultdict(list)
     actual_ids = set()
-    reconciliations = {
-        int(item["expected_id"]): dict(item)
-        for item in conn.execute(
-            """SELECT id,expected_id,status reconciliation_status,actual_id
-               FROM reconciliations WHERE run_id=? AND expected_id IS NOT NULL""",
-            (run_id,),
-        )
-    }
     for item in conn.execute(
-        """SELECT id,nf,series,doc_date,cnpj,center,sap_material,material_key,
-                  lot,manufacturer_lot,quantity,unit
-           FROM expected_movements
-           WHERE run_id=? AND direction='2'
-           ORDER BY doc_date DESC,id DESC""",
+        """SELECT e.id,e.nf,e.series,e.doc_date,e.cnpj,e.center,e.sap_material,e.material_key,
+                  e.lot,e.manufacturer_lot,e.quantity,e.unit,
+                  r.id reconciliation_id,r.status reconciliation_status,r.actual_id
+           FROM expected_movements e
+           LEFT JOIN reconciliations r ON r.run_id=e.run_id AND r.expected_id=e.id
+           WHERE e.run_id=? AND e.direction='2'
+           ORDER BY e.doc_date DESC,e.id DESC""",
         (run_id,),
     ):
         candidate = dict(item)
-        reconciliation = reconciliations.get(int(candidate["id"]), {})
-        candidate.update({
-            "reconciliation_id": reconciliation.get("id"),
-            "reconciliation_status": reconciliation.get("reconciliation_status"),
-            "actual_id": reconciliation.get("actual_id"),
-        })
         exits_by_material[candidate.get("material_key")].append(candidate)
         if candidate.get("actual_id"):
             actual_ids.add(int(candidate["actual_id"]))
@@ -1500,14 +1503,8 @@ def _balance_diagnostic(stock_row, required, measure):
 
 
 def _regularization_rows(conn, run_id, preferred_name=None, filters=None):
-    recipes = _recipes_for_regularization(conn, run_id)
-    recipe_index = _recipe_date_index(recipes)
-    product_mappings = _mapping_dict(conn, "material_product")
-    property_cnpj = _property_cnpj_map(conn)
-    stock = _stock_lookup(conn, run_id)
-    return_context = _return_chain_context(conn, run_id)
     where, params = _filter_sql(filters)
-    expected = conn.execute(
+    expected = list(conn.execute(
         """SELECT e.id expected_id,e.source_record_id,e.doc_date,e.cnpj,e.nf,e.series,e.direction,
         e.sap_material,e.material_key,e.lot,e.manufacturer_lot,e.quantity,e.unit,e.center,
         r.id reconciliation_id,r.actual_id,r.status reconciliation_status,r.diagnosis,r.details_json,
@@ -1515,7 +1512,28 @@ def _regularization_rows(conn, run_id, preferred_name=None, filters=None):
         JOIN expected_movements e ON e.id=r.expected_id JOIN source_records s ON s.id=e.source_record_id
         WHERE r.run_id=? AND r.status='NAO_LANCADO'""" + where +
         " ORDER BY e.doc_date DESC,e.nf,e.id", [run_id, *params],
-    )
+    ))
+    accepted_recipe_dates = set()
+    for item in expected:
+        if item.get("direction") == "1" or not item.get("doc_date"):
+            continue
+        try:
+            document_date = datetime.strptime(str(item["doc_date"])[:10], "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        accepted_recipe_dates.update((
+            document_date.isoformat(),
+            (document_date - timedelta(days=1)).isoformat(),
+        ))
+    recipes = _recipes_for_regularization(conn, run_id, accepted_recipe_dates)
+    recipe_index = _recipe_date_index(recipes)
+    product_mappings = _mapping_dict(conn, "material_product")
+    property_cnpj = _property_cnpj_map(conn)
+    stock = _stock_lookup(conn, run_id)
+    # A cadeia de estorno é cara e só se aplica a entradas por transferência.
+    # Carregá-la antecipadamente fazia toda abertura da fila percorrer a
+    # conciliação completa, inclusive quando não havia retorno a analisar.
+    return_context = None
     rows = []
     for item in expected:
         row = dict(item)
@@ -1542,10 +1560,12 @@ def _regularization_rows(conn, run_id, preferred_name=None, filters=None):
         if direction == "Entrada":
             origin = _entry_origin(raw, row.get("cnpj"))
             base.update(origin)
-            return_chain = (
-                _return_chain_for_item(conn, run_id, row, return_context)
-                if origin["tipo_entrada"] == "TRANSFERENCIA_RETORNO" else None
-            )
+            if origin["tipo_entrada"] == "TRANSFERENCIA_RETORNO":
+                if return_context is None:
+                    return_context = _return_chain_context(conn, run_id)
+                return_chain = _return_chain_for_item(conn, run_id, row, return_context)
+            else:
+                return_chain = None
             situation = return_chain["status"] if return_chain else "ENTRADA_FORNECEDOR"
             base.update({
                 "situacao": situation,
