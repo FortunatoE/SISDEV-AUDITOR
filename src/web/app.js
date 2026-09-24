@@ -20,7 +20,6 @@ const UPLOAD_SOURCES = [
 
 const PAGE_CONFIG = {
   pending: { title: 'Pendências', description: 'Análise lote a lote dos documentos que exigem conferência.', empty: 'Nenhuma pendência encontrada.', columns: ['status', 'situacao_descricao', 'acao_recomendada', 'diagnosis', 'confidence', 'classificacao_automacao', 'nf', 'series', 'doc_date', 'center', 'direcao', 'sap_material', 'lote_sap', 'lote_fabricante', 'quantidade_sap', 'unidade_sap', 'produto_sisdev', 'lote_sisdev', 'quantidade_sisdev'] },
-  work_queue: { title: 'Fila de trabalho', description: 'Pendências do dia com responsável, prioridade, prazo e histórico de tratamento.', empty: 'Nenhuma tarefa pendente.', columns: ['prioridade_trabalho', 'andamento', 'situacao_prazo', 'prazo', 'responsavel', 'numero_nfe', 'serie', 'data_documento', 'centro', 'direcao', 'situacao', 'acao_recomendada', 'comentarios', '__work_actions'] },
   regularization: { title: 'Regularizar SISDEV', description: 'Fila inteligente por nota fiscal: resumo primeiro e rastreabilidade sob demanda.', empty: 'Nenhuma nota fiscal para regularizar.', columns: ['prioridade', 'situacao', 'diagnostico_situacao', 'status_saldo', 'acao_recomendada', 'numero_nfe', 'serie', 'data_documento', 'cnpj', 'produto', 'volume_embalagem', 'quantidade_embalagem', 'itens_resumo', '__detail'] },
   analysis: { title: 'Análises', description: 'Resumo das ocorrências por status, diagnóstico e confiança.', empty: 'Nenhuma análise disponível.', columns: ['status', 'diagnosis', 'confidence', 'ocorrencias'] },
   invoices: { title: 'Notas Fiscais', description: 'Notas fiscais SAP consolidadas por documento, centro e direção.', empty: 'Nenhuma nota fiscal encontrada.', columns: ['nf', 'series', 'doc_date', 'center', 'direcao', 'linhas', 'quantidade_sap'] },
@@ -61,9 +60,6 @@ const LABELS = {
   status_lancamento_sap: 'Status de lançamento SAP', status_operacional: 'Status operacional',
   compatibilidade: 'Compatibilidade', tratamento_status: 'Tratamento',
   emitente: 'Emitente', tipo_entrada: 'Tipo de entrada',
-  prioridade_trabalho: 'Prioridade', andamento: 'Andamento', responsavel: 'Responsável',
-  prazo: 'Prazo', comentarios: 'Comentários',
-  situacao_prazo: 'Situação do prazo',
 };
 
 const state = {
@@ -88,11 +84,6 @@ const state = {
   lotTraceOptions: new Map(),
   lotTraceSelection: null,
   lotTraceSearchTimer: 0,
-  workQueueAssignees: [],
-  editingWorkItem: null,
-  workQueuePriority: '',
-  workQueueAssignee: '',
-  workQueueDueStatus: '',
   storageTimer: 0,
 };
 
@@ -182,9 +173,6 @@ function qs() {
     per_page: String(state.perPage),
     sort: state.sort,
     order: state.order,
-    priority: state.current === 'work_queue' ? state.workQueuePriority : '',
-    assigned_to: state.current === 'work_queue' ? state.workQueueAssignee : '',
-    due_status: state.current === 'work_queue' ? state.workQueueDueStatus : '',
   });
 }
 
@@ -1154,7 +1142,7 @@ function orderedColumns(rows, preferred = []) {
 }
 
 function isStatusColumn(column) {
-  return ['status', 'situacao', 'confidence', 'andamento'].includes(column);
+  return ['status', 'situacao', 'confidence'].includes(column);
 }
 
 function recordStatusClass(value) {
@@ -1174,8 +1162,6 @@ function renderPageTable(page, data) {
     ? preferredColumns.filter((column) => column === '__detail' || rows.some((row) => Object.hasOwn(row, column)))
     : page === 'users'
       ? preferredColumns.filter((column) => column === '__user_actions' || rows.some((row) => Object.hasOwn(row, column)))
-      : page === 'work_queue'
-        ? preferredColumns.filter((column) => column === '__work_actions' || rows.some((row) => Object.hasOwn(row, column)))
       : orderedColumns(rows, preferredColumns);
   if (page === 'regularization') populateRegularizationLotOptions(data.filter_options?.product_lots || []);
   if (page === 'pending' && rows.some((row) => row.reconciliation_id)) columns.push('__actions');
@@ -1187,8 +1173,8 @@ function renderPageTable(page, data) {
 
   if (columns.length) {
     $('page-head').append(create('tr', {}, columns.map((column) => {
-       const special = column === '__actions' || column === '__detail' || column === '__user_actions' || column === '__work_actions';
-       const button = create('button', { type: 'button', className: 'sort-button', text: column === '__actions' ? 'Tratamento' : column === '__detail' ? 'Detalhe' : column === '__user_actions' ? 'Ações' : column === '__work_actions' ? 'Tratar' : formatLabel(column) });
+       const special = column === '__actions' || column === '__detail' || column === '__user_actions';
+       const button = create('button', { type: 'button', className: 'sort-button', text: column === '__actions' ? 'Tratamento' : column === '__detail' ? 'Detalhe' : column === '__user_actions' ? 'Ações' : formatLabel(column) });
        if (special) return create('th', {}, button);
       if (state.sort === column) button.textContent += state.order === 'asc' ? ' ↑' : ' ↓';
       button.addEventListener('click', () => {
@@ -1217,11 +1203,6 @@ function renderPageTable(page, data) {
           remove.addEventListener('click', () => deleteExistingUser(row, remove));
           return create('td', { className: 'user-action-cell' }, [edit, remove]);
         }
-        if (column === '__work_actions') {
-          const button = create('button', { type: 'button', className: 'detail-button', text: 'Abrir tarefa' });
-          button.addEventListener('click', () => openWorkItem(row));
-          return create('td', { className: 'detail-action-cell' }, button);
-        }
         if (column === '__actions') {
           const button = create('button', { type: 'button', className: 'secondary', text: 'Registrar' });
           button.addEventListener('click', async () => {
@@ -1245,14 +1226,14 @@ function renderPageTable(page, data) {
           return create('td', {}, button);
         }
         const text = displayValue(column, row[column]);
-        if (column === 'prioridade' || column === 'prioridade_trabalho') {
+        if (column === 'prioridade') {
           return create('td', {}, create('span', { className: `priority-badge priority-${String(row[column] || '').toLowerCase()}`, text }));
         }
         if (column === 'diagnostico_situacao' || column === 'acao_recomendada' || column === 'status_saldo') {
           return create('td', { className: `regularization-explanation regularization-${column}`, title: text },
             create('div', { className: 'cell-clamp', text }));
         }
-        if (isStatusColumn(column) || column === 'situacao_prazo') return create('td', {}, create('span', { className: `tag ${recordStatusClass(text)}`.trim(), text }));
+        if (isStatusColumn(column)) return create('td', {}, create('span', { className: `tag ${recordStatusClass(text)}`.trim(), text }));
         return create('td', { text, title: text.length > 80 ? text : '' });
       });
       const rowClass = page === 'regularization' ? `regularization-row priority-${String(row.prioridade || '').toLowerCase()}` : '';
@@ -1260,7 +1241,6 @@ function renderPageTable(page, data) {
     }
   }
   renderPageSummary(page, data.summary);
-  renderWorkQueueManagement(page, data.management);
   renderPageActions(page);
   renderPagination(page, data.pagination);
 }
@@ -1562,58 +1542,19 @@ function renderPagination(page, pagination) {
 function renderPageSummary(page, summary) {
   const box = $('page-summary');
   box.replaceChildren();
-  if (!['regularization', 'work_queue'].includes(page) || !summary) {
+  if (page !== 'regularization' || !summary) {
     box.hidden = true;
     return;
   }
   box.hidden = false;
-  if (page === 'work_queue') {
-    box.append(
-      create('strong', { text: `${formatNumber(summary.total)} tarefas no ciclo atual` }),
-      document.createTextNode(` · ${formatNumber(summary.novas)} novas · ${formatNumber(summary.em_analise)} em análise · ${formatNumber(summary.aguardando)} aguardando informação · ${formatNumber(summary.vencidas)} vencidas · ${formatNumber(summary.vence_hoje)} vencem hoje · ${formatNumber(summary.sem_responsavel)} sem responsável.`),
-    );
-  } else {
-    box.append(
-      create('strong', { text: `${formatNumber(summary.total)} notas para regularizar` }),
-      document.createTextNode(` · ${formatNumber(summary.entries)} entradas · ${formatNumber(summary.exits)} saídas · ${formatNumber(summary.recipes_suggested)} com receita sugerida (D ou D-1).`),
-    );
-  }
-}
-
-function renderWorkQueueManagement(page, management) {
-  const panel = $('work-queue-management');
-  panel.replaceChildren();
-  if (page !== 'work_queue' || !management) {
-    panel.hidden = true;
-    return;
-  }
-  panel.hidden = false;
-  const groups = [
-    ['Carga por prioridade', management.priorities || []],
-    ['Carga por responsável', management.assignees || []],
-    ['Idade do documento', management.aging || []],
-  ];
-  for (const [title, values] of groups) {
-    const card = create('article', {}, create('h3', { text: title }));
-    const list = create('div', { className: 'management-bars' });
-    for (const item of values) {
-      const fill = create('span', { className: 'management-bar-fill' });
-      fill.style.width = `${Math.max(0, Math.min(100, Number(item.percentage) || 0))}%`;
-      list.append(create('div', { className: 'management-bar' }, [
-        create('div', { className: 'management-bar-label' }, [
-          create('span', { text: item.label }),
-          create('strong', { text: `${formatNumber(item.total)} · ${item.percentage}%` }),
-        ]),
-        create('div', { className: 'management-bar-track' }, fill),
-      ]));
-    }
-    card.append(list);
-    panel.append(card);
-  }
+  box.append(
+    create('strong', { text: `${formatNumber(summary.total)} notas para regularizar` }),
+    document.createTextNode(` · ${formatNumber(summary.entries)} entradas · ${formatNumber(summary.exits)} saídas · ${formatNumber(summary.recipes_suggested)} com receita sugerida (D ou D-1).`),
+  );
 }
 
 function addExportButtons(container, page) {
-  if (!['reports', 'regularization', 'pending', 'work_queue'].includes(page)) return;
+  if (!['reports', 'regularization', 'pending'].includes(page)) return;
   const csv = create('button', { type: 'button', text: 'Exportar CSV' });
   const excel = create('button', { type: 'button', text: 'Exportar Excel' });
   csv.addEventListener('click', () => window.location.assign(`/api/export/csv/${page}?${qs()}`));
@@ -1654,32 +1595,6 @@ function renderPageActions(page) {
   const actions = $('page-actions');
   actions.replaceChildren();
   addExportButtons(actions, page);
-  if (page === 'work_queue') {
-    const priority = create('select', { attrs: { 'aria-label': 'Filtrar por prioridade' } });
-    priority.append(new Option('Todas as prioridades', ''));
-    for (const value of ['ALTA', 'MEDIA', 'BAIXA']) priority.append(new Option(formatLabel(value), value, false, state.workQueuePriority === value));
-    priority.addEventListener('change', () => { state.workQueuePriority = priority.value; state.page = 1; loadPage(page); });
-
-    const assignee = create('select', { attrs: { 'aria-label': 'Filtrar por responsável' } });
-    assignee.append(new Option('Todos os responsáveis', ''), new Option('Sem responsável', '__unassigned__'));
-    for (const user of state.workQueueAssignees) assignee.append(new Option(user.display_name, String(user.id), false, state.workQueueAssignee === String(user.id)));
-    if (state.workQueueAssignee === '__unassigned__') assignee.value = '__unassigned__';
-    assignee.addEventListener('change', () => { state.workQueueAssignee = assignee.value; state.page = 1; loadPage(page); });
-
-    const due = create('select', { attrs: { 'aria-label': 'Filtrar por prazo' } });
-    for (const [value, label] of [['', 'Todos os prazos'], ['ATRASADA', 'Atrasadas'], ['VENCE_HOJE', 'Vencem hoje'], ['NO_PRAZO', 'No prazo'], ['SEM_PRAZO', 'Sem prazo'], ['CONCLUIDA', 'Concluídas']]) {
-      due.append(new Option(label, value, false, state.workQueueDueStatus === value));
-    }
-    due.addEventListener('change', () => { state.workQueueDueStatus = due.value; state.page = 1; loadPage(page); });
-
-    const mine = create('button', { type: 'button', className: 'secondary', text: 'Minhas tarefas' });
-    mine.addEventListener('click', () => {
-      state.workQueueAssignee = String(state.auth?.user?.id || '');
-      state.page = 1;
-      loadPage(page);
-    });
-    actions.prepend(create('div', { className: 'work-queue-filters' }, [priority, assignee, due, mine]));
-  }
   if (page === 'regularization') {
     const sortLabel = create('label', { className: 'queue-sort' }, create('span', { text: 'Ordenar por' }));
     const sortSelect = create('select', { attrs: { 'aria-label': 'Ordenar fila por' } });
@@ -1740,70 +1655,6 @@ function openUserDialog(user = null) {
   $('user-dialog').showModal();
 }
 
-async function openWorkItem(row) {
-  state.editingWorkItem = row;
-  const canManage = hasAccess(state.auth?.user?.permissions) || (state.auth?.user?.permissions || []).includes('manage_work_queue');
-  $('work-item-title').textContent = `Tarefa · NF ${safeText(row.numero_nfe)}`;
-  $('work-item-context').textContent = `${safeText(row.situacao)} · ${safeText(row.centro)} · ${safeText(row.direcao)}`;
-  $('work-item-status').value = row.andamento || 'NOVA';
-  $('work-item-priority').value = row.prioridade_trabalho || 'MEDIA';
-  $('work-item-due').value = row.prazo || '';
-  $('work-item-comment').value = '';
-  $('work-item-message').textContent = '';
-  const assignee = $('work-item-assignee');
-  assignee.replaceChildren(new Option('Não atribuído', ''));
-  for (const user of state.workQueueAssignees) assignee.append(new Option(`${user.display_name} · ${formatLabel(user.profile)}`, String(user.id)));
-  assignee.value = row.responsavel_id ? String(row.responsavel_id) : '';
-  for (const id of ['work-item-assignee', 'work-item-priority', 'work-item-due']) $(id).disabled = !canManage;
-  $('work-comments').replaceChildren(create('p', { text: 'Carregando histórico...' }));
-  $('work-item-dialog').showModal();
-  try {
-    const data = await requestJson(`/api/work-items/${encodeURIComponent(row.document_id)}/comments`, { method: 'GET' }, 20_000);
-    if (state.editingWorkItem?.document_id !== row.document_id) return;
-    $('work-comments').replaceChildren(...((data.rows || []).length
-      ? data.rows.map((item) => create('article', {}, [
-          create('strong', { text: item.author }),
-          create('small', { text: displayValue('created_at', item.created_at) }),
-          create('p', { text: item.comment }),
-        ]))
-      : [create('p', { text: 'Nenhum comentário registrado.' })]));
-  } catch (error) {
-    $('work-comments').replaceChildren(create('p', { className: 'table-error', text: error.message }));
-  }
-}
-
-async function saveCurrentWorkItem(event) {
-  event.preventDefault();
-  const row = state.editingWorkItem;
-  if (!row) return;
-  const button = $('save-work-item');
-  button.disabled = true;
-  $('work-item-message').textContent = 'Salvando...';
-  try {
-    await requestJson(`/api/work-items/${encodeURIComponent(row.document_id)}`, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        status: $('work-item-status').value,
-        assigned_to: $('work-item-assignee').value || null,
-        priority: $('work-item-priority').value,
-        due_date: $('work-item-due').value || null,
-      }),
-    }, 20_000);
-    const comment = $('work-item-comment').value.trim();
-    if (comment) await requestJson(`/api/work-items/${encodeURIComponent(row.document_id)}/comments`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ comment }),
-    }, 20_000);
-    $('work-item-dialog').close();
-    state.editingWorkItem = null;
-    await loadPage('work_queue');
-  } catch (error) {
-    $('work-item-message').textContent = error.message;
-  } finally {
-    button.disabled = false;
-  }
-}
-
 async function deleteExistingUser(user, button) {
   if (Number(user.id) === Number(state.auth?.user?.id)) {
     $('notice').hidden = false;
@@ -1835,10 +1686,8 @@ async function loadPage(page) {
   $('page-head').replaceChildren();
   $('page-body').replaceChildren(create('tr', {}, create('td', { text: 'Carregando registros...' })));
   try {
-    const endpoint = page === 'work_queue' ? '/api/work-items' : `/api/page/${encodeURIComponent(page)}`;
-    const data = await requestJson(`${endpoint}?${qs()}`, { method: 'GET' }, 45_000);
+    const data = await requestJson(`/api/page/${encodeURIComponent(page)}?${qs()}`, { method: 'GET' }, 45_000);
     if (requestId !== state.requestSequence || state.current !== page) return;
-    if (page === 'work_queue') state.workQueueAssignees = data.assignees || [];
     renderPageTable(page, data);
   } catch (error) {
     if (requestId !== state.requestSequence || state.current !== page) return;
@@ -1866,7 +1715,7 @@ function updateViewVisibility(page) {
 }
 
 function configureFilters(page) {
-  const operational = ['pending', 'regularization', 'work_queue'].includes(page);
+  const operational = ['pending', 'regularization'].includes(page);
   $('direction-filter-label').hidden = page === 'regularization';
   $('status-filter-label').hidden = !operational;
   $('nf-filter-label').hidden = !operational;
@@ -1877,8 +1726,6 @@ function configureFilters(page) {
     ? ['PENDENTE', 'REGULARIZADO', 'DIVERGENTE', 'SEM_RECEITA', 'RECEITAS_MULTIPLAS', 'SEM_SALDO', 'MATERIAL_NAO_MAPEADO', 'LOTE_NAO_MAPEADO', 'ERRO_CONCILIACAO']
     : page === 'regularization'
       ? ['PENDENTE', 'EM_ANALISE', 'TRATADO', 'ENTRADA_FORNECEDOR', 'OK', 'SEM_RECEITA', 'RECEITAS_MULTIPLAS', 'SALDO_PARCIAL', 'SEM_SALDO', 'MATERIAL_NAO_MAPEADO', 'LOTE_NAO_MAPEADO', 'MOVIMENTACAO_NAO_LOCALIZADA', 'PENDENTE_ESTORNO', 'ESTORNO_PARCIAL', 'ESTORNO_COMPLETO', 'DIVERGENTE', 'ERRO_CONCILIACAO']
-      : page === 'work_queue'
-        ? ['NOVA', 'EM_ANALISE', 'AGUARDANDO_INFORMACAO', 'REGULARIZADA', 'VALIDADA']
       : [];
   select.replaceChildren(new Option('Todos', ''));
   for (const value of options) select.append(new Option(formatLabel(value), value));
@@ -2053,8 +1900,6 @@ function installEvents() {
     $('regularization-detail-dialog').close();
   });
   $('regularization-detail-dialog').addEventListener('cancel', () => { state.detailSequence += 1; });
-  $('cancel-work-item').addEventListener('click', () => { state.editingWorkItem = null; $('work-item-dialog').close(); });
-  $('work-item-form').addEventListener('submit', saveCurrentWorkItem);
   for (const link of document.querySelectorAll('nav a[data-page]')) {
     link.addEventListener('click', (event) => {
       event.preventDefault();
@@ -2067,11 +1912,6 @@ function installEvents() {
   });
   $('clear-filters').addEventListener('click', () => {
     for (const id of ['from', 'to', 'center', 'direction', 'status-filter', 'nf-filter', 'lot-filter']) $(id).value = '';
-    if (state.current === 'work_queue') {
-      state.workQueuePriority = '';
-      state.workQueueAssignee = '';
-      state.workQueueDueStatus = '';
-    }
     state.page = 1;
     return state.current === 'dashboard' ? loadDashboard() : loadPage(state.current);
   });

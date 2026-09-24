@@ -35,7 +35,7 @@ PROFILE_PERMISSIONS: dict[str, set[str]] = {
     "ADMINISTRADOR": {"*"},
     "GESTOR": {
         "view", "export", "import", "reconcile", "manage_mappings",
-        "approve_mappings", "treat_pending", "manage_work_queue", "view_audit", "manage_backup",
+        "approve_mappings", "treat_pending", "view_audit", "manage_backup",
     },
     "AUDITOR": {"view", "export", "suggest_mappings", "treat_pending", "view_audit"},
     "OPERADOR": {"view", "treat_pending"},
@@ -44,9 +44,9 @@ PROFILE_PERMISSIONS: dict[str, set[str]] = {
 
 PROFILE_MODULES: dict[str, set[str]] = {
     "ADMINISTRADOR": {"*"},
-    "GESTOR": {"dashboard", "pending", "work_queue", "regularization", "analysis", "invoices", "recipes", "movements", "stocks", "lot_trace", "reports", "history"},
-    "AUDITOR": {"dashboard", "pending", "work_queue", "regularization", "analysis", "recipes", "materials", "lots", "lot_trace", "rules", "reports", "history", "logs"},
-    "OPERADOR": {"dashboard", "pending", "work_queue", "regularization", "invoices", "recipes", "stocks", "lot_trace"},
+    "GESTOR": {"dashboard", "pending", "regularization", "analysis", "invoices", "recipes", "movements", "stocks", "lot_trace", "reports", "history"},
+    "AUDITOR": {"dashboard", "pending", "regularization", "analysis", "recipes", "materials", "lots", "lot_trace", "rules", "reports", "history", "logs"},
+    "OPERADOR": {"dashboard", "pending", "regularization", "invoices", "recipes", "stocks", "lot_trace"},
     "CONSULTA": {"dashboard", "pending", "analysis", "invoices", "recipes", "movements", "stocks", "lot_trace", "reports"},
 }
 

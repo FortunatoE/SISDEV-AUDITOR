@@ -92,6 +92,13 @@ def _friendly_error(error: BaseException) -> str:
         return "A conexão temporária com o banco foi interrompida. Tente novamente para retomar do último lote."
     if "conteúdo do arquivo não corresponde" in lowered:
         return "O arquivo enviado não corresponde ao formato selecionado."
+    if any(fragment in lowered for fragment in (
+        "project size limit", "diskfull", "disk full", "could not extend file",
+    )):
+        return (
+            "O banco Neon atingiu o limite de armazenamento. "
+            "Arquive ciclos antigos antes de retomar esta fonte."
+        )
     if "blob" in lowered or "http error" in lowered or "urlopen" in lowered:
         return "Não foi possível ler o arquivo armazenado no Blob."
     if "database" in lowered or "postgres" in lowered or "psycopg" in lowered:
@@ -482,11 +489,6 @@ async def start_reconciliation(batch_id: int) -> Run:
 
 
 RETENTION_DELETE_QUERIES = {
-    "work_item_comments": """DELETE FROM work_item_comments WHERE id IN (
-        SELECT c.id FROM work_item_comments c
-        JOIN work_items w ON w.id=c.work_item_id WHERE w.run_id=? LIMIT ?
-    )""",
-    "work_items": "DELETE FROM work_items WHERE id IN (SELECT id FROM work_items WHERE run_id=? LIMIT ?)",
     "action_history": """DELETE FROM action_history WHERE id IN (
         SELECT h.id FROM action_history h
         JOIN reconciliations r ON r.id=h.reconciliation_id WHERE r.run_id=? LIMIT ?

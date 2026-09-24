@@ -355,31 +355,6 @@ def _security_create_statements(id_type: str, timestamp_type: str) -> list[str]:
             updated_at {timestamp_type} NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(run_id, document_key, decision_type)
         )""",
-        f"""CREATE TABLE IF NOT EXISTS work_items (
-            id {id_type} PRIMARY KEY,
-            run_id BIGINT NOT NULL,
-            document_key TEXT NOT NULL,
-            center TEXT,
-            nf TEXT,
-            series TEXT,
-            direction TEXT,
-            assigned_to BIGINT REFERENCES app_users(id),
-            status TEXT NOT NULL DEFAULT 'NOVA',
-            priority TEXT NOT NULL DEFAULT 'MEDIA',
-            due_date TEXT,
-            created_by BIGINT REFERENCES app_users(id),
-            created_at {timestamp_type} NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at {timestamp_type} NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            completed_at {timestamp_type},
-            UNIQUE(run_id, document_key)
-        )""",
-        f"""CREATE TABLE IF NOT EXISTS work_item_comments (
-            id {id_type} PRIMARY KEY,
-            work_item_id BIGINT NOT NULL REFERENCES work_items(id),
-            author_user_id BIGINT NOT NULL REFERENCES app_users(id),
-            comment TEXT NOT NULL,
-            created_at {timestamp_type} NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )""",
     ]
 
 
@@ -418,9 +393,6 @@ INDEX_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS audit_log_user_idx ON audit_log(user_id, created_at)",
     "CREATE INDEX IF NOT EXISTS run_archives_status_idx ON run_archives(status, created_at)",
     "CREATE INDEX IF NOT EXISTS document_decisions_document_idx ON document_decisions(run_id, document_key, updated_at)",
-    "CREATE INDEX IF NOT EXISTS work_items_queue_idx ON work_items(run_id, status, priority, due_date)",
-    "CREATE INDEX IF NOT EXISTS work_items_center_idx ON work_items(center, assigned_to, updated_at)",
-    "CREATE INDEX IF NOT EXISTS work_item_comments_item_idx ON work_item_comments(work_item_id, created_at)",
 ]
 
 POSTGRES_SECURITY_ALTERS = [

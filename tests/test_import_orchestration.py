@@ -36,6 +36,10 @@ def test_storage_quota_error_is_actionable():
         "O banco Neon atingiu o limite de armazenamento. "
         "Libere espaço ou amplie o plano para continuar."
     )
+    assert workflow_imports._friendly_error(error) == (
+        "O banco Neon atingiu o limite de armazenamento. "
+        "Arquive ciclos antigos antes de retomar esta fonte."
+    )
 
 
 @pytest.fixture()

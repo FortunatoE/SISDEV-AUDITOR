@@ -51,6 +51,47 @@ def main() -> None:
             f"COUNTS runs={counts[0]} batches={counts[1]} "
             f"jobs={counts[2]} source_records={counts[3]}"
         )
+        print("RECENT IMPORT JOBS")
+        for row in connection.execute(
+            """SELECT id,run_id,batch_id,source,status,processed_rows,total_rows,inserted_rows,
+                      error_rows,COALESCE(error_message,''),created_at,updated_at
+               FROM import_jobs ORDER BY id DESC LIMIT 20"""
+        ):
+            print("JOB " + " | ".join(str(value) for value in row))
+        print("LARGEST IMPORT RUNS")
+        for row in connection.execute(
+            """SELECT r.id,r.status,COUNT(s.id) AS source_rows,
+                      COALESCE(SUM(pg_column_size(s.*)),0) AS payload_bytes,
+                      r.started_at,r.finished_at
+               FROM import_runs r
+               LEFT JOIN source_records s ON s.run_id=r.id
+               GROUP BY r.id,r.status,r.started_at,r.finished_at
+               ORDER BY payload_bytes DESC LIMIT 12"""
+        ):
+            print("RUN " + " | ".join(str(value) for value in row))
+        print("RUN ORIGINALS")
+        for row in connection.execute(
+            """SELECT r.id,r.status,COUNT(j.id) AS jobs,
+                      COUNT(*) FILTER (WHERE COALESCE(j.blob_path,'')<>'') AS originals
+               FROM import_runs r LEFT JOIN import_jobs j ON j.run_id=r.id
+               WHERE r.status='SUCCESS'
+               GROUP BY r.id,r.status ORDER BY r.id DESC LIMIT 20"""
+        ):
+            print("ORIGINALS " + " | ".join(str(value) for value in row))
+        print("RECENT IMPORT EVENTS")
+        for row in connection.execute(
+            """SELECT e.job_id,j.source,e.status,e.processed_rows,e.total_rows,
+                      COALESCE(e.message,''),e.created_at
+               FROM import_job_events e JOIN import_jobs j ON j.id=e.job_id
+               WHERE e.job_id IN (SELECT id FROM import_jobs ORDER BY id DESC LIMIT 8)
+               ORDER BY e.id DESC LIMIT 30"""
+        ):
+            print("EVENT " + " | ".join(str(value) for value in row))
+        print("RUN ARCHIVES")
+        for row in connection.execute(
+            "SELECT id,run_id,status,released_rows,created_at FROM run_archives ORDER BY id"
+        ):
+            print("ARCHIVE " + " | ".join(str(value) for value in row))
 
 
 if __name__ == "__main__":

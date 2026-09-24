@@ -29,13 +29,12 @@ Principais melhorias entregues:
 - backup privado de configurações com verificação e restauração administrativa;
 - painel administrativo de armazenamento, política de retenção e arquivamento auditado por ciclo;
 - processamento assíncrono por fonte com Vercel Workflow e progresso persistido no Neon;
-- fila de trabalho persistente no Neon, com leitura de receitas limitada ao período das notas visíveis;
 - Fluid Compute habilitado e fontes grandes divididas em etapas duráveis de até 5.000 linhas, com checkpoints internos a cada 1.000 registros;
 - Central de saúde das importações com prontidão do ciclo, falhas, fontes ausentes, duração, última atividade e próxima ação recomendada;
 - rastreabilidade cronológica por produto e lote, reunindo SAP, SISDEV, receitas e tratamentos com acumulados independentes por sistema e unidade;
 - classificação preparatória `CANDIDATO_AUTOMACAO` ou `REVISAO_HUMANA`, sem executar ações críticas automaticamente.
 
-Validação local desta versão: **72 testes automatizados aprovados**, incluindo saúde do ciclo, deduplicação de upload, retenção protegida, arquivamento de ciclos, linha do tempo por lote, fila gerencial, compatibilidade com cabeçalhos XLS legados, separação entre login e migrações, retomada durável de importações, agrupamento por NF/lote, detalhamento sob demanda, autorização, isolamento por centro, ownership de importações e auditoria das decisões.
+Validação local desta versão: **70 testes automatizados aprovados**, cobrindo saúde do ciclo, deduplicação de upload, retenção protegida, arquivamento de ciclos, linha do tempo por lote, compatibilidade com cabeçalhos XLS legados, separação entre login e migrações, retomada durável de importações, agrupamento por NF/lote, detalhamento sob demanda, autorização, isolamento por centro, ownership de importações e auditoria das decisões.
 
 ### Reforço de segurança desta versão
 
@@ -57,9 +56,6 @@ O relatório técnico detalhado da auditoria é mantido como documento interno e
 | --- | --- |
 | Importações | Central de saúde do ciclo com prontidão, progresso, fontes ausentes, falhas e orientação da próxima ação. |
 | Rastreabilidade | Linha do tempo por `Produto & Lote`, reunindo documentos SAP, movimentos SISDEV, receitas, tratamentos e saldos oficiais. |
-| Fila de trabalho | Tarefas persistentes por documento, com responsável, prioridade, prazo, andamento, comentários e validação gerencial. |
-| Gestão de prazos | Filtros por prioridade, responsável e situação do prazo, atalho **Minhas tarefas** e exportação da visão filtrada. |
-| Painel gerencial | Distribuição por prioridade, carga por responsável e idade dos documentos, recalculadas conforme os filtros ativos. |
 
 As telas operacionais continuam orientadas à revisão humana: o sistema explica a divergência e recomenda a ação, mas não executa lançamentos ou estornos críticos automaticamente.
 
@@ -177,11 +173,10 @@ workflow/imports.py           Workflows duráveis de importação e conciliaçã
 src/auditor/database.py       SQLite local / Neon e schema
 src/auditor/engine.py         parsers, importação em lote e regras de conciliação
 src/auditor/normalization.py  números, documentos, lotes, unidades e texto
-src/auditor/work_queue.py     fila diária, SLA, responsáveis e exportação
 src/web/                      interface web estática
 sql/import_jobs.sql           migração idempotente do Neon
 sql/regularization_queue.sql  fila por NF, decisões humanas e índices de consulta
-sql/work_queue.sql            tarefas, comentários, responsáveis e prazos
+sql/archive_old_runs.py       arquivamento emergencial com originais preservados no Blob
 tests/                        testes de motor, API e orquestração
 pyproject.toml                dependências e registro do Workflow Python
 vercel.json                   roteamento e limites da Function
@@ -197,7 +192,6 @@ vercel.json                   roteamento e limites da Function
 - `expected_movements` / `actual_movements`: movimentos SAP e SISDEV.
 - `reconciliations` / `audit_issues`: resultado e alertas.
 - `document_decisions`: seleção/confirmação/rejeição humana por documento.
-- `work_items` / `work_item_comments`: andamento, responsável, prioridade, prazo e colaboração na fila diária.
 - `reconciliation_mappings` / `app_settings`: premissas e mapeamentos configuráveis.
 - `run_archives`: manifesto privado, integridade e quantidade liberada em cada arquivamento.
 
@@ -223,9 +217,6 @@ Em produção, `Acompanhamento SISDEV.xlsx` e o PBIX **não são fontes de dados
 | `GET/POST /api/auth/users` | Consulta/criação de usuários pelo administrador |
 | `PATCH /api/auth/users/{id}` | Perfil, situação, senha e escopos do usuário |
 | `POST /api/pending/{id}/actions` | Registra tratamento humano da pendência |
-| `GET /api/work-items` | Lista a fila diária com paginação, SLA e filtros gerenciais |
-| `PATCH /api/work-items/{document_id}` | Atualiza andamento, responsável, prioridade e prazo |
-| `GET/POST /api/work-items/{document_id}/comments` | Consulta e registra comentários da tarefa |
 | `GET /api/regularization/{document_id}` | Carrega a rastreabilidade completa de uma NF sob demanda |
 | `POST /api/regularization/{document_id}/decisions` | Salva/confirma/rejeita receitas ou movimentações relacionadas |
 | `POST /api/admin/backups` | Cria snapshot privado de configurações |
@@ -259,14 +250,13 @@ Mantenha `DATABASE_URL_UNPOOLED` somente para migrações administrativas quando
 
 ### Banco
 
-Antes da primeira publicação da fila, execute no Neon:
+Antes da primeira publicação, execute no Neon:
 
 ```text
 sql/import_jobs.sql
 sql/security_access.sql
 sql/session_audit_hardening.sql
 sql/regularization_queue.sql
-sql/work_queue.sql
 sql/storage_retention.sql
 ```
 
